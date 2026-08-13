@@ -113,8 +113,17 @@ async function call(name: string, params: Record<string, unknown>) {
 
   const head = await call("zellij_dump", { pane_id: pid, max_lines: 10, tail: false, session: SESSION });
   check("dump: head when tail=false", head.content.includes("1") && !head.content.includes("60"), head.content.slice(0, 150));
-
   await call("zellij_close", { pane_id: pid, session: SESSION });
+}
+
+// --- zellij_run: target=tab ------------------------------------------------------
+{
+  const r = await call("zellij_run", { command: "echo TABRUN_OK; exit 5", target: "tab", name: "harness-tab", session: SESSION, timeout: 30 });
+  check("run in tab: exit code", r.details.exit_status === 5 && typeof r.details.tab_id === "number", JSON.stringify(r.details));
+  check("run in tab: output", r.content.includes("TABRUN_OK"), r.content.slice(0, 120));
+  const panes = await call("zellij_list", { session: SESSION });
+  const p = (panes.details.panes as Array<{ id: string; tab_name: string | null }>).find((x) => x.id === r.details.pane_id);
+  check("run in tab: pane lives in named tab", p?.tab_name === "harness-tab", JSON.stringify(p));
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);
