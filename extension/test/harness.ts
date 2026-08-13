@@ -5,7 +5,9 @@
  */
 import { default as ext } from "../src/index.ts";
 
-const SESSION = process.argv[2] ?? "tool-test";
+// Fresh session per run: zellij resurrects killed sessions from its cache, so a fixed
+// name accumulates panes across runs and the server slows down. Pass a name to override.
+const SESSION = process.argv[2] ?? `tool-test-${Date.now() % 100000}`;
 
 const tools = new Map<string, { execute: Function; parameters: unknown }>();
 const fakePi = {
@@ -153,6 +155,74 @@ async function call(name: string, params: Record<string, unknown>) {
   const w4 = await call("zellij_wait", { pane_id: pid3, for: "exit", timeout: 10, session: SESSION });
   check("tui: exited after q", w4.details.exited === true, JSON.stringify(w4.details));
   await call("zellij_close", { pane_id: pid3, session: SESSION });
+}
+
+// --- principles: evidence on failure, terminal-state early return, idle wait ------
+{
+  // output-wait on a pane that exits mid-wait: must return early with the exit state, not burn the timeout
+  const r = await call("zellij_run", { command: "sleep 1; echo BYE_NOW", wait: "none", session: SESSION });
+  const pid = r.details.pane_id as string;
+  const w = await call("zellij_wait", { pane_id: pid, pattern: "NEVER_MATCH_99", timeout: 20, session: SESSION });
+  check(
+    "wait output: pane exit returns early with state",
+    w.details.matched === false && w.details.terminal === "exited" && w.details.exit_status === 0 && w.details.elapsed_ms < 10000,
+    JSON.stringify(w.details),
+  );
+  await call("zellij_close", { pane_id: pid, session: SESSION });
+
+  // output-wait timeout: evidence must be included
+  const r2 = await call("zellij_run", { command: "echo EVIDENCE_LINE_77; sleep 15", wait: "none", session: SESSION });
+  const pid2 = r2.details.pane_id as string;
+  const w2 = await call("zellij_wait", { pane_id: pid2, pattern: "NEVER_MATCH_98", timeout: 2, session: SESSION });
+  check(
+    "wait output: timeout carries evidence",
+    w2.details.matched === false && String(w2.details.evidence ?? "").includes("EVIDENCE_LINE_77"),
+    JSON.stringify(w2.details).slice(0, 300),
+  );
+  await call("zellij_close", { pane_id: pid2, session: SESSION });
+
+  // exit-wait timeout: evidence too
+  const r2b = await call("zellij_run", { command: "echo EXIT_EVIDENCE_66; sleep 15", wait: "none", session: SESSION });
+  const pid2b = r2b.details.pane_id as string;
+  const w2b = await call("zellij_wait", { pane_id: pid2b, for: "exit", timeout: 2, session: SESSION });
+  check(
+    "wait exit: timeout carries evidence",
+    w2b.details.exited === false && String(w2b.details.evidence ?? "").includes("EXIT_EVIDENCE_66"),
+    JSON.stringify(w2b.details).slice(0, 300),
+  );
+  await call("zellij_close", { pane_id: pid2b, session: SESSION });
+
+  // idle wait: settles after output stops (pane must stay alive past the settle window,
+  // otherwise terminal:exited correctly wins the race)
+  const r3 = await call("zellij_run", { command: "echo IDLE_FIRST; sleep 1; echo IDLE_LAST_66; sleep 30", wait: "none", session: SESSION });
+  const pid3 = r3.details.pane_id as string;
+  const w3 = await call("zellij_wait_idle", { pane_id: pid3, settle: 1, timeout: 15, session: SESSION });
+  check(
+    "wait idle: settles with evidence",
+    w3.details.idle === true && String(w3.details.evidence ?? "").includes("IDLE_LAST_66"),
+    JSON.stringify(w3.details).slice(0, 300),
+  );
+  await call("zellij_close", { pane_id: pid3, session: SESSION });
+
+  // idle wait on a pane that exits while quiet: terminal state, not timeout
+  const r3b = await call("zellij_run", { command: "sleep 3", wait: "none", session: SESSION });
+  const pid3b = r3b.details.pane_id as string;
+  const w3b = await call("zellij_wait_idle", { pane_id: pid3b, settle: 10, timeout: 15, session: SESSION });
+  check(
+    "wait idle: pane exit returns early",
+    w3b.details.terminal === "exited" && w3b.details.exit_status === 0 && w3b.details.elapsed_ms < 10000,
+    JSON.stringify(w3b.details),
+  );
+  await call("zellij_close", { pane_id: pid3b, session: SESSION });
+
+  // run timeout: carries output so far
+  const r4 = await call("zellij_run", { command: "echo RUN_EVIDENCE_55; sleep 20", timeout: 3, session: SESSION });
+  check(
+    "run timeout: carries output so far",
+    r4.details.timed_out === true && String(r4.details.output_captured ?? "").includes("RUN_EVIDENCE_55"),
+    JSON.stringify(r4.details).slice(0, 300),
+  );
+  await call("zellij_close", { pane_id: r4.details.pane_id as string, session: SESSION });
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);

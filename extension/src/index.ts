@@ -128,9 +128,24 @@ interface PaneInfo {
 }
 
 async function listPanes(sessionArgs: string[]): Promise<PaneInfo[]> {
-  const { stdout, code } = await runZellij([...sessionArgs, "action", "list-panes", "--json"]);
+  // The zellij server intermittently answers a CLI call with empty stdout (exit 0),
+  // typically right after a killed `zellij subscribe`. Retry so waits don't crash on it.
+  let stdout = "";
+  let code: number | null = -1;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await runZellij([...sessionArgs, "action", "list-panes", "--json"]);
+    stdout = res.stdout;
+    code = res.code;
+    if (code === 0 && stdout.trim()) break;
+    await new Promise((r) => setTimeout(r, 300));
+  }
   if (code !== 0) throw new Error(`list-panes failed: ${stdout} ${code}`);
-  const parsed = JSON.parse(stdout) as Array<Record<string, unknown>>;
+  let parsed: Array<Record<string, unknown>>;
+  try {
+    parsed = JSON.parse(stdout) as Array<Record<string, unknown>>;
+  } catch {
+    throw new Error(`list-panes returned no JSON (3 attempts): ${stdout.slice(0, 200)}`);
+  }
   return parsed
     .filter((p) => p.is_plugin !== true)
     .map((p) => ({
@@ -154,7 +169,39 @@ function findPane(panes: PaneInfo[], paneId: string): PaneInfo {
   return found;
 }
 
-/** Subscribe to a pane's output; resolve on first matching line, or null on timeout. */
+/** Snapshot of a pane's process state, or null if the session is transiently unreachable. */
+async function paneExitState(
+  sessionArgs: string[],
+  paneId: string,
+): Promise<{ exited: boolean; removed: boolean; exit_status: number | null } | null> {
+  let panes;
+  try {
+    panes = await listPanes(sessionArgs);
+  } catch {
+    return null; // transient failure — unknown, let the caller keep waiting
+  }
+  try {
+    const pane = findPane(panes, paneId);
+    return { exited: pane.exited, removed: false, exit_status: pane.exit_status };
+  } catch {
+    // Pane gone from the layout (interactive shells are removed on exit) = exited.
+    return { exited: true, removed: true, exit_status: null };
+  }
+}
+
+type WaitOutcome = {
+  status: "matched" | "idle" | "timeout" | "exited";
+  line?: string;
+  elapsedMs: number;
+  exit_status: number | null;
+  removed: boolean;
+};
+
+/**
+ * Subscribe to a pane's output; resolve on first matching line, on the pane
+ * reaching a terminal state (process exited / pane closed), or on timeout.
+ * The caller gets the terminal state so a failed match is immediately diagnosable.
+ */
 async function waitForPattern(
   paneId: string,
   pattern: string,
@@ -162,7 +209,7 @@ async function waitForPattern(
   timeoutMs: number,
   sessionArgs: string[],
   signal?: AbortSignal,
-): Promise<{ matched: string | null; elapsedMs: number }> {
+): Promise<WaitOutcome> {
   return new Promise((resolve) => {
     const child = spawn("zellij", [...sessionArgs, "subscribe", "--pane-id", paneId], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -170,18 +217,40 @@ async function waitForPattern(
     let buf = "";
     let done = false;
 
-    const finish = (matched: string | null, elapsedMs: number) => {
+    const finish = (outcome: WaitOutcome) => {
       if (done) return;
       done = true;
+      clearInterval(watchdog);
       child.kill("SIGKILL");
-      resolve({ matched, elapsedMs });
+      resolve(outcome);
     };
 
     const start = Date.now();
-    const timer = setTimeout(() => finish(null, Date.now() - start), timeoutMs);
-    const onAbort = () => finish(null, Date.now() - start);
+    const timer = setTimeout(
+      () => finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false }),
+      timeoutMs,
+    );
+    const onAbort = () =>
+      finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
     if (signal?.aborted) onAbort();
     else signal?.addEventListener("abort", onAbort, { once: true });
+
+    // Terminal-state watchdog: if the pane's process exits while we wait for output,
+    // return that state instead of burning the full timeout.
+    const watchdog = setInterval(async () => {
+      if (done) return;
+      const st = await paneExitState(sessionArgs, paneId);
+      if (st?.exited) {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        finish({
+          status: "exited",
+          elapsedMs: Date.now() - start,
+          exit_status: st.exit_status,
+          removed: st.removed,
+        });
+      }
+    }, 500);
 
     child.stdout.on("data", (d) => {
       buf += d;
@@ -192,7 +261,7 @@ async function waitForPattern(
         if (hit) {
           clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
-          finish(line.trim(), Date.now() - start);
+          finish({ status: "matched", line: line.trim(), elapsedMs: Date.now() - start, exit_status: null, removed: false });
           return;
         }
       }
@@ -200,15 +269,94 @@ async function waitForPattern(
     child.on("error", () => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      finish(null, Date.now() - start);
+      finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
     });
-    child.on("close", () => {
+    child.on("close", async () => {
       // subscriber exited (e.g. pane closed) — flush remaining buffer
       if (!done && buf.trim()) {
         const hit = regex ? new RegExp(pattern).test(buf) : buf.includes(pattern);
-        if (hit) finish(buf.trim(), Date.now() - start);
+        if (hit) finish({ status: "matched", line: buf.trim(), elapsedMs: Date.now() - start, exit_status: null, removed: false });
       }
-      if (!done) finish(null, Date.now() - start);
+      if (!done) {
+        const st = await paneExitState(sessionArgs, paneId);
+        if (st?.exited) {
+          finish({ status: "exited", elapsedMs: Date.now() - start, exit_status: st.exit_status, removed: st.removed });
+        } else {
+          finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
+        }
+      }
+    });
+  });
+}
+
+/**
+ * Subscribe to a pane's output and resolve once the pane has produced no new
+ * output for `settleMs` ("wait for stability"), or when its process exits,
+ * or on timeout.
+ */
+async function waitForIdle(
+  paneId: string,
+  settleMs: number,
+  timeoutMs: number,
+  sessionArgs: string[],
+  signal?: AbortSignal,
+): Promise<WaitOutcome> {
+  return new Promise((resolve) => {
+    const child = spawn("zellij", [...sessionArgs, "subscribe", "--pane-id", paneId], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let done = false;
+    let lastChange = Date.now();
+
+    const finish = (outcome: WaitOutcome) => {
+      if (done) return;
+      done = true;
+      clearInterval(watchdog);
+      child.kill("SIGKILL");
+      resolve(outcome);
+    };
+
+    const start = Date.now();
+    const timer = setTimeout(
+      () => finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false }),
+      timeoutMs,
+    );
+    const onAbort = () =>
+      finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+
+    const watchdog = setInterval(async () => {
+      if (done) return;
+      const st = await paneExitState(sessionArgs, paneId);
+      if (st?.exited) {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        finish({
+          status: "exited",
+          elapsedMs: Date.now() - start,
+          exit_status: st.exit_status,
+          removed: st.removed,
+        });
+        return;
+      }
+      if (Date.now() - lastChange >= settleMs) {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        finish({ status: "idle", elapsedMs: Date.now() - start, exit_status: null, removed: false });
+      }
+    }, 200);
+
+    child.stdout.on("data", (d) => {
+      if (!done && d.length) lastChange = Date.now();
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
+    });
+    child.on("close", () => {
+      if (!done) finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
     });
   });
 }
@@ -285,7 +433,16 @@ export default function zellijExtension(pi: ExtensionAPI) {
       if (params.cwd) createArgs.push("--cwd", params.cwd);
       createArgs.push("--", "sh", "-c", command);
 
-      const created = await runZellij(createArgs, { timeoutMs: 30_000, signal });
+      let created = await runZellij(createArgs, { timeoutMs: 30_000, signal });
+      // The server intermittently answers with empty stdout (exit 0), typically right
+      // after a killed subscriber — retry creation once before giving up.
+      if (!created.stdout.trim() && !created.killed) {
+        await new Promise((r) => setTimeout(r, 300));
+        created = await runZellij(createArgs, { timeoutMs: 30_000, signal });
+      }
+      if (created.killed) {
+        throw new Error(`new-${inTab ? "tab" : "pane"} timed out after 30s`);
+      }
       const createdId = created.stdout.trim();
       let paneId: string;
       let tabId: number | null = null;
@@ -332,11 +489,10 @@ export default function zellijExtension(pi: ExtensionAPI) {
 
 
       const timedOut = !pane?.exited;
-      const output = timedOut
-        ? null
-        : params.capture !== false
-          ? await dumpPane(paneId, true, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal)
-          : null;
+      // Evidence on failure: on timeout, still capture output so far (tail kept).
+      const output = params.capture !== false
+        ? await dumpPane(paneId, true, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal)
+        : null;
 
       let condition = "exit";
       if (params.wait === "exit-success" && pane?.exit_status === 0) condition = "exit-success (met)";
@@ -347,7 +503,8 @@ export default function zellijExtension(pi: ExtensionAPI) {
         condition = "exit-failure NOT met — command exited 0";
 
       const text = timedOut
-        ? `${inTab ? "Tab" : "Pane"} ${inTab ? tabId : paneId} still running after ${params.timeout ?? 600}s (timeout). Pane keeps running; use zellij_wait or zellij_dump.`
+        ? `${inTab ? "Tab" : "Pane"} ${inTab ? tabId : paneId} still running after ${params.timeout ?? 600}s (timeout). Pane keeps running. Output so far:\n${output?.text ?? "(capture disabled)"}` +
+          (output?.truncated ? "\n... [truncated]" : "")
         : `Command finished: exit status ${pane?.exit_status} (${condition}), waited ${waited}s in ${where}.` +
           (output?.text ? `\n\n--- output (${paneId}) ---\n${output.text}` + (output.truncated ? "\n... [truncated]" : "") : "");
 
@@ -463,10 +620,12 @@ export default function zellijExtension(pi: ExtensionAPI) {
     label: "Zellij: Wait for Output",
     description:
       "Block until a condition in a zellij pane. for=output (default): a pattern appears in the pane's output (subscribe-based, no polling; also matches output already on screen). " +
-      "for=exit: the pane's process exits (exited=true). Prefer exit for interactive apps/TUIs, where rendered output text is unstable and dump-screen cannot be trusted mid-render.",
+      "for=exit: the pane's process exits (exited=true). Prefer exit for interactive apps/TUIs, where rendered output text is unstable and dump-screen cannot be trusted mid-render. " +
+      "Failed waits are self-diagnosing: an output-wait returns early with the exit state if the pane exits, and timeouts carry the pane's last output as evidence.",
     promptSnippet: "Wait until a pattern appears in a zellij pane's output, or until the pane's process exits",
     promptGuidelines: [
-      "Use zellij_wait — never raw `zellij subscribe | grep` pipelines — to wait for output patterns; it handles the subscriber lifecycle and timeout. For interactive/TUI apps, wait with for=exit instead of matching rendered output.",
+      "Use zellij_wait — never raw `zellij subscribe | grep` pipelines — to wait for output patterns; it handles the subscriber lifecycle and timeout. For interactive/TUI apps, wait with for=exit instead of matching rendered output. " +
+      "A failed zellij_wait already returns the reason (pane exited, or last output on timeout) — never follow it with a raw dump-screen to diagnose.",
     ],
     parameters: Type.Object({
       pane_id: Type.String({ description: "Pane id (e.g. terminal_3 or 3)" }),
@@ -494,21 +653,32 @@ export default function zellijExtension(pi: ExtensionAPI) {
         let pane: PaneInfo | undefined;
         let gone = false;
         while (Date.now() - started < timeoutMs) {
-          const panes = await listPanes(sessionArgs);
           try {
-            pane = findPane(panes, params.pane_id);
+            const panes = await listPanes(sessionArgs);
+            try {
+              pane = findPane(panes, params.pane_id);
+            } catch {
+              gone = true; // pane removed from layout = it exited
+              break;
+            }
+            if (pane.exited) break;
           } catch {
-            gone = true; // pane removed from layout = it exited
-            break;
+            // transient list-panes failure — keep waiting
           }
-          if (pane.exited) break;
           if (signal?.aborted) break;
           await new Promise((r) => setTimeout(r, 500));
         }
         const exited = gone || (pane?.exited ?? false);
+        // Evidence on failure: a timed-out exit-wait carries the pane's last output.
+        let evidence: string | null = null;
+        if (!exited) {
+          const ev = await dumpPane(params.pane_id, true, 20, true, sessionArgs, signal);
+          evidence = ev.text;
+        }
         const text = exited
           ? `Pane ${params.pane_id} exited` + (pane?.exit_status !== null ? ` with status ${pane?.exit_status}` : " (removed from layout)") + ` after ${((Date.now() - started) / 1000).toFixed(1)}s.`
-          : `Pane ${params.pane_id} still running after ${params.timeout ?? 300}s (timeout).`;
+          : `Pane ${params.pane_id} still running after ${params.timeout ?? 300}s (timeout).` +
+            (evidence ? `\n\nLast output:\n${evidence}` : "");
         return {
           content: [{ type: "text", text }],
           details: {
@@ -517,6 +687,7 @@ export default function zellijExtension(pi: ExtensionAPI) {
             exit_status: pane?.exit_status ?? null,
             removed_from_layout: gone,
             elapsed_ms: Date.now() - started,
+            evidence,
           },
         };
       }
@@ -535,7 +706,7 @@ export default function zellijExtension(pi: ExtensionAPI) {
           details: { pane_id: params.pane_id, matched: true, elapsed_ms: 0, line: hit.trim() },
         };
       }
-      const { matched, elapsedMs } = await waitForPattern(
+      const res = await waitForPattern(
         params.pane_id,
         params.pattern,
         params.regex === true,
@@ -543,17 +714,114 @@ export default function zellijExtension(pi: ExtensionAPI) {
         sessionArgs,
         signal,
       );
-      if (matched === null) {
+      if (res.status === "exited") {
+        // Terminal state reached before the pattern: return it, not a timeout.
         return {
           content: [
-            { type: "text", text: `Pattern not found within ${params.timeout ?? 300}s in pane ${params.pane_id}.` },
+            {
+              type: "text",
+              text:
+                `Pattern not found — pane ${params.pane_id} exited` +
+                (res.exit_status !== null ? ` with status ${res.exit_status}` : " (removed from layout)") +
+                ` after ${(res.elapsedMs / 1000).toFixed(1)}s.`,
+            },
           ],
-          details: { pane_id: params.pane_id, matched: false, elapsed_ms: elapsedMs },
+          details: {
+            pane_id: params.pane_id,
+            matched: false,
+            terminal: "exited",
+            exit_status: res.exit_status,
+            removed_from_layout: res.removed,
+            elapsed_ms: res.elapsedMs,
+          },
+        };
+      }
+      if (res.status === "timeout") {
+        // Evidence on failure: last output lines, so the caller can see why.
+        const ev = await dumpPane(params.pane_id, true, 20, true, sessionArgs, signal);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Pattern not found within ${params.timeout ?? 300}s in pane ${params.pane_id} (pane still running).` +
+                `\n\nLast output:\n${ev.text}`,
+            },
+          ],
+          details: { pane_id: params.pane_id, matched: false, elapsed_ms: res.elapsedMs, evidence: ev.text },
         };
       }
       return {
-        content: [{ type: "text", text: `Matched in ${(elapsedMs / 1000).toFixed(1)}s: ${matched}` }],
-        details: { pane_id: params.pane_id, matched: true, elapsed_ms: elapsedMs, line: matched },
+        content: [{ type: "text", text: `Matched in ${(res.elapsedMs / 1000).toFixed(1)}s: ${res.line}` }],
+        details: { pane_id: params.pane_id, matched: true, elapsed_ms: res.elapsedMs, line: res.line },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "zellij_wait_idle",
+    label: "Zellij: Wait for Idle",
+    description:
+      "Block until a zellij pane produces no new output for `settle` seconds (wait for stability), then return the settled output. " +
+      "Use after triggering work: a TUI response rendered, a log flood settling, a build quiescing — then read the world once. " +
+      "Also returns early if the pane's process exits while waiting. On timeout returns the last output as evidence.",
+    promptSnippet: "Wait until a zellij pane stops changing (idle), then read its output",
+    promptGuidelines: [
+      "Use zellij_wait_idle instead of sleep-polling to let a pane settle: it watches the output stream and returns as soon as the pane is quiet, with the settled output included. Never emulate it with `sleep` loops.",
+    ],
+    parameters: Type.Object({
+      pane_id: Type.String({ description: "Pane id (e.g. terminal_3 or 3)" }),
+      settle: Type.Optional(Type.Number({ description: "Seconds of silence that counts as idle (default 2)", default: 2 })),
+      timeout: Type.Optional(Type.Number({ description: "Max seconds to wait (default 300)", default: 300 })),
+      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const sessionArgs = await resolveSession(params.session);
+      const timeoutMs = (params.timeout ?? 300) * 1000;
+      const res = await waitForIdle(params.pane_id, (params.settle ?? 2) * 1000, timeoutMs, sessionArgs, signal);
+      const ev = await dumpPane(params.pane_id, true, 100, true, sessionArgs, signal);
+      if (res.status === "idle") {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Pane ${params.pane_id} quiet for ${params.settle ?? 2}s (idle after ${(res.elapsedMs / 1000).toFixed(1)}s).` +
+                `\n\nCurrent output:\n${ev.text}`,
+            },
+          ],
+          details: { pane_id: params.pane_id, idle: true, elapsed_ms: res.elapsedMs, evidence: ev.text },
+        };
+      }
+      if (res.status === "exited") {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Pane ${params.pane_id} exited while waiting for idle` +
+                (res.exit_status !== null ? ` with status ${res.exit_status}` : " (removed from layout)") +
+                ` after ${(res.elapsedMs / 1000).toFixed(1)}s.`,
+            },
+          ],
+          details: {
+            pane_id: params.pane_id,
+            idle: false,
+            terminal: "exited",
+            exit_status: res.exit_status,
+            removed_from_layout: res.removed,
+            elapsed_ms: res.elapsedMs,
+          },
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Pane ${params.pane_id} never went quiet within ${params.timeout ?? 300}s. Last output:\n${ev.text}`,
+          },
+        ],
+        details: { pane_id: params.pane_id, idle: false, timed_out: true, elapsed_ms: res.elapsedMs, evidence: ev.text },
       };
     },
   });
