@@ -126,5 +126,34 @@ async function call(name: string, params: Record<string, unknown>) {
   check("run in tab: pane lives in named tab", p?.tab_name === "harness-tab", JSON.stringify(p));
 }
 
+// --- zellij_wait for=exit, raw bytes, interactive-TUI flow ------------------------
+{
+  // wait on exit for a plain command pane
+  const r = await call("zellij_run", { command: "sleep 3", wait: "none", session: SESSION });
+  const pid = r.details.pane_id as string;
+  const w = await call("zellij_wait", { pane_id: pid, for: "exit", timeout: 10, session: SESSION });
+  check("wait exit: command pane exits with status", w.details.exited === true && w.details.exit_status === 0, JSON.stringify(w.details));
+  await call("zellij_close", { pane_id: pid, session: SESSION });
+
+  // raw bytes path (pty echoes what is written)
+  const r2 = await call("zellij_run", { command: "sleep 10", wait: "none", session: SESSION });
+  const pid2 = r2.details.pane_id as string;
+  await call("zellij_send", { pane_id: pid2, raw: "echo RAW_BYTES_99\n", session: SESSION });
+  const w2 = await call("zellij_wait", { pane_id: pid2, pattern: "RAW_BYTES_99", timeout: 5, session: SESSION });
+  check("raw bytes: written and matched", w2.details.matched === true, JSON.stringify(w2.details));
+  await call("zellij_close", { pane_id: pid2, session: SESSION });
+
+  // full interactive-TUI flow in a tab: spawn top, exit-wait times out while running,
+  // 'q' quits it, exit-wait fires, close (last pane of tab -> tab closes too)
+  const r3 = await call("zellij_run", { command: "top", target: "tab", name: "tui-tab", wait: "none", session: SESSION });
+  const pid3 = r3.details.pane_id as string;
+  const w3 = await call("zellij_wait", { pane_id: pid3, for: "exit", timeout: 3, session: SESSION });
+  check("tui: exit-wait times out while running", w3.details.exited === false, JSON.stringify(w3.details));
+  await call("zellij_send", { pane_id: pid3, keys: ["q"], session: SESSION });
+  const w4 = await call("zellij_wait", { pane_id: pid3, for: "exit", timeout: 10, session: SESSION });
+  check("tui: exited after q", w4.details.exited === true, JSON.stringify(w4.details));
+  await call("zellij_close", { pane_id: pid3, session: SESSION });
+}
+
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

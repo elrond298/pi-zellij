@@ -25,12 +25,12 @@ The skill lands in `~/.agents/skills/zellij/` (auto-discovered). The extension i
 
 | Tool | Purpose | Reliability notes |
 |---|---|---|
-| `zellij_run` | Run a shell command in a new pane, wait for it | Real exit code (sh -c), 1 s poll instead of sleep-guessing, timeout returns partial results |
-| `zellij_dump` | Read pane output (viewport / full scrollback) | ANSI stripped, line-capped for context |
-| `zellij_send` | Paste text + named keys into a pane | Bracketed paste, multi-line safe |
-| `zellij_wait` | Wait until a pattern appears in pane output | Subscribe-based, kills subscriber, timeout |
-| `zellij_list` | List panes/tabs with id, command, exit status | JSON → compact text |
-| `zellij_close` | Close a pane | — |
+| `zellij_run` | Run a shell command in a new pane **or tab** (`target`), wait for it | Real exit code (sh -c), 1 s poll instead of sleep-guessing, timeout returns partial results; `wait=none` returns the pane id instantly for interactive apps |
+| `zellij_dump` | Read pane output (viewport / full scrollback) | ANSI stripped, tail kept when line-capped |
+| `zellij_send` | Paste text, named keys, or raw bytes into a pane | Bracketed paste multi-line safe; `raw` accepts `\xNN` escape sequences |
+| `zellij_wait` | Wait for a pattern in pane output, or `for: "exit"` for the process to exit | Subscribe-based, scrollback pre-check, kills subscriber, timeout; `exit` mode for TUIs |
+| `zellij_list` | List panes/tabs/sessions with id, command, exit status | Pane ids canonicalized to `terminal_N` |
+| `zellij_close` | Close a pane (last pane of a tab closes the tab) | — |
 
 All tools auto-resolve the session: explicit `session` (auto-created headless if missing) → current session when running inside zellij → default `pi` session.
 

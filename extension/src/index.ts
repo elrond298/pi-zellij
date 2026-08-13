@@ -230,11 +230,13 @@ export default function zellijExtension(pi: ExtensionAPI) {
     name: "zellij_run",
     label: "Zellij: Run Command",
     description:
-      "Run a shell command in a new zellij pane and wait for it to finish. Returns the pane id, real exit code, and final output. Use for long-running commands, builds, tests, servers — anything where the duration is unknown. Never combine with sleep; the tool waits internally. " +
-      "The command runs via sh -c, so pipes, globs, and $VARS work. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped.",
-    promptSnippet: "Run a command in a zellij pane and wait for it (returns exit code + output)",
+      "Run a shell command in a new zellij pane (or tab, with target=tab) and wait for it to finish. Returns the pane id, real exit code, and final output. Use for long-running commands, builds, tests, servers — anything where the duration is unknown. Never combine with sleep; the tool waits internally. " +
+      "The command runs via sh -c, so pipes, globs, and $VARS work. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped. " +
+      "For interactive apps: wait=none creates the pane/tab and returns the pane id immediately — then drive it with zellij_send and zellij_wait, and finish with zellij_close.",
+    promptSnippet: "Run a command in a zellij pane or tab and wait for it (returns exit code + output)",
     promptGuidelines: [
       "Use zellij_run for any command that should run in a terminal pane with visible output — do not emulate long-running processes with bash sleep loops.",
+      "For interactive apps (TUIs, REPLs, editors), spawn with zellij_run wait=none (target=tab puts it in its own tab) and drive it with zellij_send / zellij_wait / zellij_close.",
       "Never fall back to raw `zellij action new-pane` or `zellij run` + manual waiting: zellij_run waits internally and returns the real exit code and output.",
     ],
     parameters: Type.Object({
@@ -408,6 +410,12 @@ export default function zellijExtension(pi: ExtensionAPI) {
     parameters: Type.Object({
       pane_id: Type.Optional(Type.String({ description: "Pane id (e.g. terminal_3 or 3). Default: the pane this agent runs in." })),
       text: Type.Optional(Type.String({ description: "Text to paste into the pane (multi-line safe)" })),
+      raw: Type.Optional(
+        Type.String({
+          description:
+            "Raw byte sequence to write (zellij action write), with \\xNN escapes — e.g. \"\\x1b[3~\" for Delete or \"\\x1b[1;5C\" for Ctrl+Right. Use when named keys cannot express the sequence. Mutually exclusive with text.",
+        }),
+      ),
       keys: Type.Optional(
         Type.Array(Type.String({ description: "Named keys to send after text, e.g. [\"Enter\"], [\"Ctrl c\"], [\"Escape\"]" })),
       ),
@@ -424,15 +432,25 @@ export default function zellijExtension(pi: ExtensionAPI) {
 
       if (params.text) {
         await runZellij([...sessionArgs, "action", "paste", "--pane-id", paneId, params.text], { signal });
+      } else if (params.raw) {
+        const bytes = Array.from(
+          params.raw.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))),
+        ).map((c) => String(c.charCodeAt(0)));
+        await runZellij([...sessionArgs, "action", "write", "--pane-id", paneId, ...bytes], { signal });
       }
       for (const key of keys) {
         await runZellij([...sessionArgs, "action", "send-keys", "--pane-id", paneId, key], { signal });
       }
+      const summary = params.text
+        ? ` "${params.text.replace(/\n/g, "\\n")}"`
+        : params.raw
+          ? ` raw "${params.raw}"`
+          : "";
       return {
         content: [
           {
             type: "text",
-            text: `Sent to ${paneId}:${params.text ? ` "${params.text.replace(/\n/g, "\\n")}"` : ""}${keys.length ? ` + keys [${keys.join(", ")}]` : ""}`,
+            text: `Sent to ${paneId}:${summary}${keys.length ? ` + keys [${keys.join(", ")}]` : ""}`,
           },
         ],
         details: { pane_id: paneId },
@@ -444,21 +462,68 @@ export default function zellijExtension(pi: ExtensionAPI) {
     name: "zellij_wait",
     label: "Zellij: Wait for Output",
     description:
-      "Block until a pattern appears in a zellij pane's output (subscribe-based, no polling; also matches output already on screen). " +
-      "Returns the matched line. Use for 'tell me when X appears' — e.g. a build log line, an error, a prompt.",
-    promptSnippet: "Wait until a pattern appears in a zellij pane's output",
+      "Block until a condition in a zellij pane. for=output (default): a pattern appears in the pane's output (subscribe-based, no polling; also matches output already on screen). " +
+      "for=exit: the pane's process exits (exited=true). Prefer exit for interactive apps/TUIs, where rendered output text is unstable and dump-screen cannot be trusted mid-render.",
+    promptSnippet: "Wait until a pattern appears in a zellij pane's output, or until the pane's process exits",
     promptGuidelines: [
-      "Use zellij_wait — never raw `zellij subscribe | grep` pipelines — to wait for output patterns; it handles the subscriber lifecycle and timeout.",
+      "Use zellij_wait — never raw `zellij subscribe | grep` pipelines — to wait for output patterns; it handles the subscriber lifecycle and timeout. For interactive/TUI apps, wait with for=exit instead of matching rendered output.",
     ],
     parameters: Type.Object({
       pane_id: Type.String({ description: "Pane id (e.g. terminal_3 or 3)" }),
-      pattern: Type.String({ description: "Text to look for (substring match unless regex=true)" }),
+      for: Type.Optional(
+        Type.String({
+          description: "What to wait for: output (default) — the pattern appearing in pane output; exit — the pane's process exiting. For exit, pattern is ignored.",
+          enum: ["output", "exit"],
+          default: "output",
+        }),
+      ),
+      pattern: Type.Optional(Type.String({ description: "Text to look for (substring match unless regex=true); required when for=output" })),
       regex: Type.Optional(Type.Boolean({ description: "Treat pattern as a regular expression (default false)", default: false })),
       timeout: Type.Optional(Type.Number({ description: "Max seconds to wait (default 300)", default: 300 })),
       session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
     }),
+
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
+      const timeoutMs = (params.timeout ?? 300) * 1000;
+
+      if (params.for === "exit") {
+        // Wait for the pane's process to exit (or the pane to disappear — interactive
+        // shells are removed from the layout when they exit, which is itself the signal).
+        const started = Date.now();
+        let pane: PaneInfo | undefined;
+        let gone = false;
+        while (Date.now() - started < timeoutMs) {
+          const panes = await listPanes(sessionArgs);
+          try {
+            pane = findPane(panes, params.pane_id);
+          } catch {
+            gone = true; // pane removed from layout = it exited
+            break;
+          }
+          if (pane.exited) break;
+          if (signal?.aborted) break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        const exited = gone || (pane?.exited ?? false);
+        const text = exited
+          ? `Pane ${params.pane_id} exited` + (pane?.exit_status !== null ? ` with status ${pane?.exit_status}` : " (removed from layout)") + ` after ${((Date.now() - started) / 1000).toFixed(1)}s.`
+          : `Pane ${params.pane_id} still running after ${params.timeout ?? 300}s (timeout).`;
+        return {
+          content: [{ type: "text", text }],
+          details: {
+            pane_id: params.pane_id,
+            exited,
+            exit_status: pane?.exit_status ?? null,
+            removed_from_layout: gone,
+            elapsed_ms: Date.now() - started,
+          },
+        };
+      }
+
+      if (!params.pattern) {
+        throw new Error("pattern is required when for=output");
+      }
       // Pre-check the full scrollback: subscribe only replays the viewport, so output that
       // appeared before we attached would otherwise be missed.
       const existing = await dumpPane(params.pane_id, true, 5000, true, sessionArgs, signal);
@@ -474,7 +539,7 @@ export default function zellijExtension(pi: ExtensionAPI) {
         params.pane_id,
         params.pattern,
         params.regex === true,
-        (params.timeout ?? 300) * 1000,
+        timeoutMs,
         sessionArgs,
         signal,
       );
@@ -545,7 +610,9 @@ export default function zellijExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "zellij_close",
     label: "Zellij: Close Pane",
-    description: "Close a zellij pane (terminates its process). Use for cleanup after a command finished.",
+    description:
+      "Close a zellij pane (terminates its process). Use for cleanup after a command finished. " +
+      "Note: closing the last pane of a tab also closes that tab.",
     promptSnippet: "Close a zellij pane",
     promptGuidelines: [
       "Use zellij_close — never raw `zellij action close-pane` — to clean up panes.",
