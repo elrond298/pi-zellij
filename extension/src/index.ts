@@ -75,11 +75,12 @@ function runZellij(
 async function listSessions(): Promise<string[]> {
   const { stdout, code } = await runZellij(["list-sessions"]);
   if (code !== 0) return [];
-  return stdout
+  const clean = stdout.replace(/\x1b\[[0-9;]*m/g, ""); // strip ANSI colors (zellij colors output even when piped)
+  return clean
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean)
-    .filter((l) => !l.includes("(EXITED"))
+    .filter((l) => !l.includes("EXITED")) // tombstones: "(EXITED - attach to resurrect)"
     .map((l) => l.split(" ")[0])
     .filter((s) => s && s !== "No" && !s.startsWith("No active"));
 }
@@ -210,11 +211,12 @@ async function waitForPattern(
   });
 }
 
-/** Cap long text for LLM context; note the truncation. */
-function capOutput(text: string, maxLines: number): { text: string; truncated: boolean } {
+/** Cap long text for LLM context; keep the tail by default (terminal output is read bottom-up). */
+function capOutput(text: string, maxLines: number, keepTail: boolean): { text: string; truncated: boolean } {
   const lines = text.split("\n");
   if (lines.length <= maxLines) return { text, truncated: false };
-  return { text: lines.slice(0, maxLines).join("\n"), truncated: true };
+  const slice = keepTail ? lines.slice(-maxLines) : lines.slice(0, maxLines);
+  return { text: slice.join("\n"), truncated: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -227,10 +229,11 @@ export default function zellijExtension(pi: ExtensionAPI) {
     label: "Zellij: Run Command",
     description:
       "Run a shell command in a new zellij pane and wait for it to finish. Returns the pane id, real exit code, and final output. Use for long-running commands, builds, tests, servers — anything where the duration is unknown. Never combine with sleep; the tool waits internally. " +
-      "The command runs via sh -c, so pipes, globs, and $VARS work. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later.",
+      "The command runs via sh -c, so pipes, globs, and $VARS work. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped.",
     promptSnippet: "Run a command in a zellij pane and wait for it (returns exit code + output)",
     promptGuidelines: [
       "Use zellij_run for any command that should run in a terminal pane with visible output — do not emulate long-running processes with bash sleep loops.",
+      "Never fall back to raw `zellij action new-pane` or `zellij run` + manual waiting: zellij_run waits internally and returns the real exit code and output.",
     ],
     parameters: Type.Object({
       command: Type.String({ description: "Command to run (shell syntax allowed; wrapped in sh -c)" }),
@@ -251,6 +254,9 @@ export default function zellijExtension(pi: ExtensionAPI) {
         Type.Number({ description: "Max seconds to wait (default 600). On expiry returns partial results.", default: 600 }),
       ),
       max_lines: Type.Optional(Type.Number({ description: "Cap on returned output lines (default 500)", default: 500 })),
+      tail: Type.Optional(
+        Type.Boolean({ description: "When output exceeds max_lines, return the last lines instead of the first (default true)", default: true }),
+      ),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
@@ -290,7 +296,7 @@ export default function zellijExtension(pi: ExtensionAPI) {
       const output = timedOut
         ? null
         : params.capture !== false
-          ? await dumpPane(paneId, true, params.max_lines ?? 500, sessionArgs, signal)
+          ? await dumpPane(paneId, true, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal)
           : null;
 
       let condition = "exit";
@@ -325,18 +331,25 @@ export default function zellijExtension(pi: ExtensionAPI) {
     label: "Zellij: Dump Screen",
     description:
       "Read a zellij pane's current output (viewport, or full scrollback with full=true). ANSI stripped. " +
-      "Use to check what is on a pane's screen right now, or to capture final output after a command finished.",
-    promptSnippet: "Read the current or full output of a zellij pane",
+      "Use to check what is on a pane's screen right now, or to capture final output after a command finished. " +
+      "When the output exceeds max_lines, the tail (last lines) is returned by default — for terminal output the tail is what matters.",
+    promptSnippet: "Read the current or full output of a zellij pane (tail kept when capped)",
+    promptGuidelines: [
+      "Use zellij_dump — never the raw `zellij action dump-screen` CLI — when reading pane output; it handles session targeting, ANSI stripping, and line capping (tail by default).",
+    ],
     parameters: Type.Object({
       pane_id: Type.Optional(Type.String({ description: "Pane id (e.g. terminal_3 or 3). Default: the pane this agent runs in." })),
       full: Type.Optional(Type.Boolean({ description: "Include full scrollback (default true)", default: true })),
-      max_lines: Type.Optional(Type.Number({ description: "Cap on returned lines (default 500)", default: 500 })),
-      session: Type.Optional(Type.String({ description: "Zellij session name (see zellij_run)" })),
+      max_lines: Type.Optional(Type.Number({ description: "Cap on returned lines (default 500); the tail is kept when capped", default: 500 })),
+      tail: Type.Optional(
+        Type.Boolean({ description: "When output exceeds max_lines, return the last lines instead of the first (default true)", default: true }),
+      ),
+      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
       const paneId = normalizePaneId(params.pane_id);
-      const output = await dumpPane(paneId, params.full !== false, params.max_lines ?? 500, sessionArgs, signal);
+      const output = await dumpPane(paneId, params.full !== false, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal);
       return {
         content: [{ type: "text", text: output.text + (output.truncated ? "\n... [truncated]" : "") }],
         details: { pane_id: paneId, truncated: output.truncated, lines: output.text.split("\n").length },
@@ -351,6 +364,9 @@ export default function zellijExtension(pi: ExtensionAPI) {
       "Send input to a zellij pane: paste text (bracketed paste — multi-line safe) and/or named keys. " +
       "Use for interactive commands, answering prompts, or driving a REPL in a pane.",
     promptSnippet: "Send text or keys to a zellij pane (paste + Enter)",
+    promptGuidelines: [
+      "Use zellij_send — never raw `zellij action paste` / `zellij action send-keys` — for pane input; it combines text + keys and handles session targeting.",
+    ],
     parameters: Type.Object({
       pane_id: Type.Optional(Type.String({ description: "Pane id (e.g. terminal_3 or 3). Default: the pane this agent runs in." })),
       text: Type.Optional(Type.String({ description: "Text to paste into the pane (multi-line safe)" })),
@@ -360,7 +376,7 @@ export default function zellijExtension(pi: ExtensionAPI) {
       press_enter: Type.Optional(
         Type.Boolean({ description: "Send Enter after the text (default true when text is given)", default: true }),
       ),
-      session: Type.Optional(Type.String({ description: "Zellij session name (see zellij_run)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
@@ -393,15 +409,29 @@ export default function zellijExtension(pi: ExtensionAPI) {
       "Block until a pattern appears in a zellij pane's output (subscribe-based, no polling; also matches output already on screen). " +
       "Returns the matched line. Use for 'tell me when X appears' — e.g. a build log line, an error, a prompt.",
     promptSnippet: "Wait until a pattern appears in a zellij pane's output",
+    promptGuidelines: [
+      "Use zellij_wait — never raw `zellij subscribe | grep` pipelines — to wait for output patterns; it handles the subscriber lifecycle and timeout.",
+    ],
     parameters: Type.Object({
       pane_id: Type.String({ description: "Pane id (e.g. terminal_3 or 3)" }),
       pattern: Type.String({ description: "Text to look for (substring match unless regex=true)" }),
       regex: Type.Optional(Type.Boolean({ description: "Treat pattern as a regular expression (default false)", default: false })),
       timeout: Type.Optional(Type.Number({ description: "Max seconds to wait (default 300)", default: 300 })),
-      session: Type.Optional(Type.String({ description: "Zellij session name (see zellij_run)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
+      // Pre-check the full scrollback: subscribe only replays the viewport, so output that
+      // appeared before we attached would otherwise be missed.
+      const existing = await dumpPane(params.pane_id, true, 5000, true, sessionArgs, signal);
+      const rx = params.regex === true ? new RegExp(params.pattern) : null;
+      const hit = existing.text.split("\n").find((line) => (rx ? rx.test(line) : line.includes(params.pattern)));
+      if (hit) {
+        return {
+          content: [{ type: "text", text: `Matched in 0.0s (already on screen): ${hit.trim()}` }],
+          details: { pane_id: params.pane_id, matched: true, elapsed_ms: 0, line: hit.trim() },
+        };
+      }
       const { matched, elapsedMs } = await waitForPattern(
         params.pane_id,
         params.pattern,
@@ -429,17 +459,27 @@ export default function zellijExtension(pi: ExtensionAPI) {
     name: "zellij_list",
     label: "Zellij: List Panes",
     description:
-      "List all panes (or tabs) in a zellij session with id, title, command, cwd, exit status, focus. " +
-      "Use to discover pane ids or check whether commands have finished (exited/exit_status).",
-    promptSnippet: "List zellij panes or tabs with their ids and state",
+      "List panes, tabs, or sessions in zellij with id, title, command, cwd, exit status, focus. " +
+      "Use to discover pane ids, check whether commands have finished (exited/exit_status), or find which session a pane lives in.",
+    promptSnippet: "List zellij panes, tabs, or sessions with their ids and state",
+    promptGuidelines: [
+      "Use zellij_list — never raw `zellij action list-panes`, `zellij list-tabs`, or `zellij list-sessions` — to inspect state.",
+    ],
     parameters: Type.Object({
       resource: Type.Optional(
-        Type.String({ description: "What to list: panes (default) or tabs", enum: ["panes", "tabs"], default: "panes" }),
+        Type.String({ description: "What to list: panes (default), tabs, or sessions", enum: ["panes", "tabs", "sessions"], default: "panes" }),
       ),
-      session: Type.Optional(Type.String({ description: "Zellij session name (see zellij_run)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
+      if (params.resource === "sessions") {
+        const sessions = await listSessions();
+        return {
+          content: [{ type: "text", text: sessions.join("\n") || "(no active sessions)" }],
+          details: { sessions },
+        };
+      }
       if (params.resource === "tabs") {
         const { stdout, code } = await runZellij([...sessionArgs, "action", "list-tabs", "--json"], { signal });
         if (code !== 0) throw new Error(`list-tabs failed: ${stdout}`);
@@ -469,9 +509,12 @@ export default function zellijExtension(pi: ExtensionAPI) {
     label: "Zellij: Close Pane",
     description: "Close a zellij pane (terminates its process). Use for cleanup after a command finished.",
     promptSnippet: "Close a zellij pane",
+    promptGuidelines: [
+      "Use zellij_close — never raw `zellij action close-pane` — to clean up panes.",
+    ],
     parameters: Type.Object({
       pane_id: Type.Optional(Type.String({ description: "Pane id (e.g. terminal_3 or 3). Default: the pane this agent runs in." })),
-      session: Type.Optional(Type.String({ description: "Zellij session name (see zellij_run)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
@@ -491,6 +534,7 @@ async function dumpPane(
   paneId: string,
   full: boolean,
   maxLines: number,
+  keepTail: boolean,
   sessionArgs: string[],
   signal?: AbortSignal,
 ): Promise<{ text: string; truncated: boolean }> {
@@ -498,5 +542,5 @@ async function dumpPane(
   if (full) args.push("--full");
   const { stdout, code } = await runZellij(args, { timeoutMs: 30_000, signal });
   if (code !== 0) throw new Error(`dump-screen failed: ${stdout}`);
-  return capOutput(stdout.replace(/\n+$/, ""), maxLines);
+  return capOutput(stdout.replace(/\n+$/, ""), maxLines, keepTail);
 }

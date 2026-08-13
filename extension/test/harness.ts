@@ -70,6 +70,12 @@ async function call(name: string, params: Record<string, unknown>) {
   const w = await call("zellij_wait", { pane_id: pid, pattern: "FRESH_PATTERN_42", timeout: 10, session: SESSION });
   check("wait: live pattern matched", w.details.matched === true, JSON.stringify(w.details));
 
+  // live subscribe path: pattern appears AFTER the wait starts (1s delay)
+  const pending = call("zellij_wait", { pane_id: pid, pattern: "LIVE_AFTER_WAIT_77", timeout: 10, session: SESSION });
+  await new Promise((r) => setTimeout(r, 1000));
+  await call("zellij_send", { pane_id: pid, text: "echo LIVE_AFTER_WAIT_77", session: SESSION });
+  const w3 = await pending;
+  check("wait: live subscribe path", w3.details.matched === true && w3.details.elapsed_ms > 0, JSON.stringify(w3.details));
   // wait timeout path
   const w2 = await call("zellij_wait", { pane_id: pid, pattern: "NEVER_SHOWN_99", timeout: 2, session: SESSION });
   check("wait: timeout path", w2.details.matched === false, JSON.stringify(w2.details));
@@ -89,6 +95,26 @@ async function call(name: string, params: Record<string, unknown>) {
 {
   const r = await call("zellij_list", { resource: "tabs", session: SESSION });
   check("list tabs", r.content.includes("tab "), r.content.slice(0, 100));
+}
+
+// --- zellij_list: sessions resource --------------------------------------------
+{
+  const r = await call("zellij_list", { resource: "sessions", session: SESSION });
+  check("list sessions", r.details.sessions?.includes(SESSION), JSON.stringify(r.details.sessions));
+}
+
+// --- tail behavior: capped dumps keep the tail, not the head --------------------
+{
+  const r = await call("zellij_run", { command: "seq 1 60", session: SESSION, timeout: 30 });
+  const pid = r.details.pane_id as string;
+
+  const tail = await call("zellij_dump", { pane_id: pid, max_lines: 10, session: SESSION });
+  check("dump: tail kept when capped", tail.content.includes("60") && !tail.content.includes("1\n2"), tail.content.slice(0, 150));
+
+  const head = await call("zellij_dump", { pane_id: pid, max_lines: 10, tail: false, session: SESSION });
+  check("dump: head when tail=false", head.content.includes("1") && !head.content.includes("60"), head.content.slice(0, 150));
+
+  await call("zellij_close", { pane_id: pid, session: SESSION });
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);
