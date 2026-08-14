@@ -12,6 +12,7 @@ Requirements: pi, zellij ≥ 0.40.
 | **Skill** | `extension/skills/zellij/` | Teaches pi to drive zellij through subprocess calls — no socket or library. Loads whenever pi needs to run something in a pane, read pane output, or manage panes/sessions |
 | Tests | `extension/test/` | Live-session tests for the tools and the slash command |
 | Installer | `install.sh` | Registers the package with pi |
+| Package manifest | `package.json` | The pi package structure — `pi.extensions` / `pi.skills` point at the extension and skill |
 
 ## Installation
 
