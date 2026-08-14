@@ -1,0 +1,11 @@
+{
+  "name": "pi-zellij",
+  "version": "0.1.0",
+  "private": true,
+  "keywords": ["pi-package"],
+  "description": "Reliable zellij control for pi: 7 tools, /zellij-pi slash command, bundled zellij skill",
+  "pi": {
+    "extensions": ["./extension/src/index.ts"],
+    "skills": ["./extension/skills"]
+  }
+}
