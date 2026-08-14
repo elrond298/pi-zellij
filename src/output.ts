@@ -44,8 +44,6 @@ export function capNote(o: { truncated: boolean; compressed: number }): string {
 
 
 
-// extension
-
 export async function dumpPane(
   paneId: string,
   full: boolean,

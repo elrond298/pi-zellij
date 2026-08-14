@@ -43,7 +43,7 @@ let failures = 0;
 const notifies: { level: string; msg: string }[] = [];
 function fakeCtx(over: Record<string, unknown> = {}) {
   return {
-    cwd: `${HOME}/opt/${PROJ}/extension`, // inside the pi-zellij repo
+    cwd: `${HOME}/opt/${PROJ}`, // inside the pi-zellij repo
     ui: {
       notify: (msg: string, level: string) => notifies.push({ level, msg }),
       select: async (_t: string, opts: string[]) => over.select ?? opts[0],

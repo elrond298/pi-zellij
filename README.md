@@ -8,11 +8,12 @@ Requirements: pi, zellij ≥ 0.40.
 
 | Piece | Location | What it does |
 |---|---|---|
-| **Extension** | `extension/src/` | 7 custom tools that wrap `zellij action`/`subscribe` with reliability built in (real exit codes, timeouts, no sleep-guessing), plus the `/zellij-pi` slash command |
-| **Skill** | `extension/skills/zellij/` | Teaches pi to drive zellij through subprocess calls — no socket or library. Loads whenever pi needs to run something in a pane, read pane output, or manage panes/sessions |
-| Tests | `extension/test/` | Live-session tests for the tools and the slash command |
+| **Extension** | `src/` | 7 custom tools that wrap `zellij action`/`subscribe` with reliability built in (real exit codes, timeouts, no sleep-guessing), plus the `/zellij-pi` slash command |
+| **Skill** | `skills/zellij/` | Teaches pi to drive zellij through subprocess calls — no socket or library. Loads whenever pi needs to run something in a pane, read pane output, or manage panes/sessions |
+| Tests | `test/` | Live-session tests for the tools and the slash command |
 | Installer | `install.sh` | Registers the package with pi |
 | Package manifest | `package.json` | The pi package structure — `pi.extensions` / `pi.skills` point at the extension and skill |
+
 
 ## Installation
 
@@ -22,7 +23,7 @@ cd pi-zellij
 ./install.sh
 ```
 
-`install.sh` runs `pi install extension/` (idempotent) and removes the stale pre-package skill copy at `~/.agents/skills/zellij`. The skill is discovered from this repo directly, so editing `extension/skills/zellij/` takes effect without re-installing; extension code changes need `./install.sh` again.
+`install.sh` runs `pi install <repo>` (idempotent) and removes the stale pre-package skill copy at `~/.agents/skills/zellij`. The skill is discovered from this repo directly, so editing `skills/zellij/` takes effect without re-installing; extension code changes need `./install.sh` again.
 
 ## Extension
 
@@ -58,9 +59,9 @@ The bundled `zellij` skill is a CLI reference for controlling zellij from a shel
 ## Development
 
 ```bash
-cd extension && npm install                          # once, for a fresh clone
-cd extension && node --experimental-strip-types test/harness.ts        # tools, live session (fresh per run)
-cd extension && node --experimental-strip-types test/command-test.ts   # /zellij-pi — run INSIDE a zellij pane
+npm install                                             # once, for a fresh clone
+node --experimental-strip-types test/harness.ts        # tools, live session (fresh per run)
+node --experimental-strip-types test/command-test.ts   # /zellij-pi — run INSIDE a zellij pane
 ```
 
 The repo is jj-managed (colocated git). Commit, then re-install:

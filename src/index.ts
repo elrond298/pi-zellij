@@ -8,7 +8,7 @@
  * - bracketed paste for multi-line input (zellij_send)
  * - every wait has a timeout; timeouts return partial results, never hang
  *
- * Install:  pi install /path/to/extension
+ * Install:  pi install /path/to/pi-zellij
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerTools } from "./tools.ts";
