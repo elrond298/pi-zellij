@@ -1,6 +1,6 @@
 # pi-zellij
 
-Reliable zellij control for [pi](https://github.com/earendil-works/pi-coding-agent): **one extension** (7 tools + a slash command) and **one skill**, bundled in a single package.
+Reliable [zellij](https://zellij.dev) control for [pi](https://github.com/earendil-works/pi-coding-agent): **one extension** (7 tools + a slash command) and **one skill**, bundled in a single package.
 
 Requirements: pi, zellij ≥ 0.40.
 
