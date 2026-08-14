@@ -1,24 +1,31 @@
 # pi-zellij
 
-Reliable zellij control for pi: a skill (reference + helper scripts) and a pi extension (custom tools).
+Reliable zellij control for [pi](https://github.com/earendil-works/pi-coding-agent): **one extension** (7 tools + a slash command) and **one skill**, bundled in a single package.
 
-## Layout
+Requirements: pi, zellij ≥ 0.40.
 
-extension/src/            # pi extension — modular: cli.ts, wait.ts, output.ts, workspace.ts, tools.ts, command.ts, index.ts (entry)
-extension/skills/zellij/  # skill bundled in the package: SKILL.md + references/ + scripts/
-extension/test/harness.ts # tool tests against a live zellij session
-install.sh                # register the package with pi (extension + bundled skill)
-```
+## What's inside
 
-## Install
+| Piece | Location | What it does |
+|---|---|---|
+| **Extension** | `extension/src/` | 7 custom tools that wrap `zellij action`/`subscribe` with reliability built in (real exit codes, timeouts, no sleep-guessing), plus the `/zellij-pi` slash command |
+| **Skill** | `extension/skills/zellij/` | Teaches pi to drive zellij through subprocess calls — no socket or library. Loads whenever pi needs to run something in a pane, read pane output, or manage panes/sessions |
+| Tests | `extension/test/` | Live-session tests for the tools and the slash command |
+| Installer | `install.sh` | Registers the package with pi |
+
+## Installation
 
 ```bash
+git clone <repo-url> pi-zellij
+cd pi-zellij
 ./install.sh
 ```
 
-The package registers the extension (7 tools + `/zellij-pi`) **and** the bundled zellij skill (`pi.skills` in `extension/package.json`); the skill is discovered from this repo directly, so edits take effect without re-installing.
+`install.sh` runs `pi install extension/` (idempotent) and removes the stale pre-package skill copy at `~/.agents/skills/zellij`. The skill is discovered from this repo directly, so editing `extension/skills/zellij/` takes effect without re-installing; extension code changes need `./install.sh` again.
 
-## Extension tools
+## Extension
+
+### Tools
 
 | Tool | Purpose | Reliability notes |
 |---|---|---|
@@ -32,22 +39,31 @@ The package registers the extension (7 tools + `/zellij-pi`) **and** the bundled
 
 All tools auto-resolve the session: explicit `session` (auto-created headless if missing) → current session when running inside zellij → default `pi` session.
 
-## Slash command
+### Slash command
 
-`/zellij-pi` (works inside a zellij session) opens a new pi in a new pane (or tab with `--tab`):
-- `--cwd <dir>` (or a positional `<dir>`) — open pi in that directory instead of the current one; relative paths resolve against the current cwd
-- `--workspace [project/]name` — a workspace under `~/.worktrees/<project>/<name>` (the pi-worktree convention); without a name, pick interactively from existing workspaces or create one
-- Creating a workspace mirrors pi-worktree's behavior: a git repo creates a `git worktree add -b <name>` worktree (attaches if the branch exists), a jj repo adds a `jj workspace add` workspace, and a bare directory (no repo at the current cwd) falls back to `mkdir` + `jj git init`/`git init`. A bare name uses the repo at the current cwd as the project; pass `project/name` explicitly for another project
+`/zellij-pi` (inside a zellij session) opens a new pi in a new pane, or tab with `--tab`:
+- `--cwd <dir>` or a positional `<dir>` — open pi there; relative paths resolve against the current cwd
+- `--workspace [project/]name` — a workspace under `~/.worktrees/<project>/<name>` (the pi-worktree convention); without a name, pick interactively from existing workspaces or create one. Workspace creation mirrors pi-worktree: `git worktree add -b <name>` for git repos, `jj workspace add` for jj repos, `mkdir` + init for bare directories. A bare name uses the repo at the current cwd as the project; pass `project/name` explicitly for another project
 
-## Test
+## Skill
+
+The bundled `zellij` skill is a CLI reference for controlling zellij from a shell:
+
+- **Session targeting** — `zellij action ...` inside a session, `--session NAME` outside or cross-session
+- **Core workflow** — blocking `new-pane --block-until-exit -- cmd` for one-shot commands, `paste`/`send-keys` for interactive ones, exit-code capture via `list-panes --json`
+- **Which read command?** — a decision table: `dump-screen` for "what's on screen now", `subscribe` for streaming and pattern waits
+- **Reference** — `references/cli-actions.md` (full command patterns and gotchas) and `scripts/wait-for-pattern.sh` (block until a pattern appears)
+
+## Development
 
 ```bash
+cd extension && npm install                          # once, for a fresh clone
 cd extension && node --experimental-strip-types test/harness.ts        # tools, live session (fresh per run)
 cd extension && node --experimental-strip-types test/command-test.ts   # /zellij-pi — run INSIDE a zellij pane
 ```
-## Repo workflow
 
-jj-managed (colocated git). Commit, then `./install.sh`:
+The repo is jj-managed (colocated git). Commit, then re-install:
+
 ```bash
 jj commit -m "message" <paths>
 ./install.sh
