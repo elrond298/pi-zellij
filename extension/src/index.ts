@@ -10,10 +10,12 @@
  *
  * Install:  pi install /path/to/extension
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn } from "node:child_process";
-
+import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -360,14 +362,151 @@ async function waitForIdle(
     });
   });
 }
+// ---------------------------------------------------------------------------
+// /zellij-pi command helpers: workspace resolution under ~/opt
+// ---------------------------------------------------------------------------
 
-/** Cap long text for LLM context; keep the tail by default (terminal output is read bottom-up). */
-function capOutput(text: string, maxLines: number, keepTail: boolean): { text: string; truncated: boolean } {
-  const lines = text.split("\n");
-  if (lines.length <= maxLines) return { text, truncated: false };
-  const slice = keepTail ? lines.slice(-maxLines) : lines.slice(0, maxLines);
-  return { text: slice.join("\n"), truncated: true };
+interface ZpArgs {
+  tab: boolean;
+  cwd?: string;
+  workspace?: string;
+  workspaceSet: boolean;
 }
+
+function parseZpArgs(args: string): ZpArgs {
+  const out: ZpArgs = { tab: false, workspaceSet: false };
+  const toks = args.split(/\s+/).filter(Boolean);
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t === "--tab") out.tab = true;
+    else if (t === "--cwd") out.cwd = toks[++i];
+    else if (t.startsWith("--cwd=")) out.cwd = t.slice("--cwd=".length);
+    else if (t === "--workspace") {
+      out.workspaceSet = true;
+      const next = toks[i + 1];
+      if (next && !next.startsWith("--")) out.workspace = toks[++i];
+    } else if (t.startsWith("--workspace=")) {
+      out.workspaceSet = true;
+      out.workspace = t.slice("--workspace=".length);
+    } else if (!t.startsWith("-")) {
+      out.cwd = t; // positional = cwd
+    }
+  }
+  return out;
+}
+
+/** Existing workspaces: ~/opt entries whose target holds a .git or .jj dir. */
+async function listWorkspaces(optDir: string): Promise<{ name: string; vcs: string }[]> {
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = await fs.promises.readdir(optDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: { name: string; vcs: string }[] = [];
+  for (const e of entries) {
+    let dir = path.join(optDir, e.name);
+    try {
+      if (e.isSymbolicLink()) dir = await fs.promises.realpath(dir);
+      if (!(await fs.promises.stat(dir)).isDirectory()) continue;
+      const vcs = fs.existsSync(path.join(dir, ".jj")) ? "jj" : fs.existsSync(path.join(dir, ".git")) ? "git" : null;
+      if (vcs) out.push({ name: e.name, vcs });
+    } catch {
+      // dangling symlink or unreadable — skip
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Resolve a workspace under ~/opt. Convention: ~/opt entries are symlinks to
+ * ~/WORK/opt/<name>. If the workspace is missing, create it interactively
+ * (real dir + symlink, jj or git init). Returns null if the user cancels.
+ */
+async function resolveWorkspace(
+  name: string | undefined,
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+): Promise<string | null> {
+  const optDir = path.join(os.homedir(), "opt");
+  if (!name) {
+    const existing = await listWorkspaces(optDir);
+    const pick = await ctx.ui.select(
+      "Workspace (under ~/opt):",
+      [...existing.map((w) => `${w.name} (${w.vcs})`), "＋ create new workspace"],
+    );
+    if (!pick) return null;
+    if (pick === "＋ create new workspace") {
+      name = await ctx.ui.input("New workspace name:", "e.g. pi-worktree");
+      if (!name?.trim()) return null;
+      name = name.trim();
+    } else {
+      return path.join(optDir, pick.split(" ")[0]);
+    }
+  }
+  const link = path.join(optDir, name);
+  if (fs.existsSync(link)) return link;
+
+  const ok = await ctx.ui.confirm(
+    "Create workspace",
+    `${link} does not exist. Create it (with a jj or git repo) and open pi there?`,
+  );
+  if (!ok) return null;
+  const vcs = await ctx.ui.select("Version control:", ["jj (recommended)", "git"]);
+  if (!vcs) return null;
+
+  // Follow the ~/opt → ~/WORK/opt symlink convention when WORK/opt exists.
+  const workOpt = path.join(os.homedir(), "WORK", "opt");
+  const real = fs.existsSync(workOpt) ? path.join(workOpt, name) : link;
+  await fs.promises.mkdir(real, { recursive: true });
+  if (real !== link) {
+    try {
+      await fs.promises.symlink(real, link);
+    } catch {
+      // symlink already raced us — fine, link now points at the dir
+    }
+  }
+
+  const bin = vcs.startsWith("jj") ? "jj" : "git";
+  // `jj git init` works on both old and new jj; plain `jj init` was removed in newer versions.
+  const initArgs = vcs.startsWith("jj") ? ["git", "init"] : ["init"];
+  const res = await pi.exec(bin, initArgs, { cwd: real });
+  if (res.code !== 0) {
+    ctx.ui.notify(`${bin} init failed in ${real}: ${res.stderr}`, "error");
+    return null;
+  }
+  ctx.ui.notify(`Workspace ready: ${link} (${vcs})`, "info");
+  return link;
+}
+
+function capOutput(text: string, maxLines: number, keepTail: boolean): { text: string; truncated: boolean; compressed: number } {
+  const out: string[] = [];
+  let compressed = 0;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    const last = out[out.length - 1];
+    if (line === "" ? last === "" : line === last) {
+      compressed++;
+      continue;
+    }
+    out.push(line);
+  }
+  if (out.length <= maxLines) return { text: out.join("\n"), truncated: false, compressed };
+  const slice = keepTail ? out.slice(-maxLines) : out.slice(0, maxLines);
+  return { text: slice.join("\n"), truncated: true, compressed };
+}
+
+function showLine(line: string): string {
+  return line.length > 200 ? line.slice(0, 200) + "... [line truncated]" : line;
+}
+
+/** Marker lines appended after capped/compressed output. */
+function capNote(o: { truncated: boolean; compressed: number }): string {
+  return (o.truncated ? "\n... [truncated]" : "") +
+    (o.compressed ? `\n... [${o.compressed} blank/duplicate line${o.compressed === 1 ? "" : "s"} collapsed]` : "");
+}
+
+
 
 // ---------------------------------------------------------------------------
 // extension
@@ -379,8 +518,8 @@ export default function zellijExtension(pi: ExtensionAPI) {
     label: "Zellij: Run Command",
     description:
       "Run a shell command in a new zellij pane (or tab, with target=tab) and wait for it to finish. Returns the pane id, real exit code, and final output. Use for long-running commands, builds, tests, servers — anything where the duration is unknown. Never combine with sleep; the tool waits internally. " +
-      "The command runs via sh -c, so pipes, globs, and $VARS work. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped. " +
-      "For interactive apps: wait=none creates the pane/tab and returns the pane id immediately — then drive it with zellij_send and zellij_wait, and finish with zellij_close.",
+      "The command runs via sh -c, so pipes, globs, and $VARS work. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped; trailing whitespace stripped, blank-line runs and consecutive duplicate lines collapsed.",
+
     promptSnippet: "Run a command in a zellij pane or tab and wait for it (returns exit code + output)",
     promptGuidelines: [
       "Use zellij_run for any command that should run in a terminal pane with visible output — do not emulate long-running processes with bash sleep loops.",
@@ -504,9 +643,10 @@ export default function zellijExtension(pi: ExtensionAPI) {
 
       const text = timedOut
         ? `${inTab ? "Tab" : "Pane"} ${inTab ? tabId : paneId} still running after ${params.timeout ?? 600}s (timeout). Pane keeps running. Output so far:\n${output?.text ?? "(capture disabled)"}` +
-          (output?.truncated ? "\n... [truncated]" : "")
+          capNote(output ?? { truncated: false, compressed: 0 })
         : `Command finished: exit status ${pane?.exit_status} (${condition}), waited ${waited}s in ${where}.` +
-          (output?.text ? `\n\n--- output (${paneId}) ---\n${output.text}` + (output.truncated ? "\n... [truncated]" : "") : "");
+          (output?.text ? `\n\n--- output (${paneId}) ---\n${output.text}` + capNote(output) : "");
+
 
       return {
         content: [{ type: "text", text }],
@@ -527,8 +667,9 @@ export default function zellijExtension(pi: ExtensionAPI) {
     name: "zellij_dump",
     label: "Zellij: Dump Screen",
     description:
-      "Read a zellij pane's current output (viewport, or full scrollback with full=true). ANSI stripped. " +
+      "Read a zellij pane's current output (viewport, or full scrollback with full=true). ANSI stripped; trailing whitespace stripped, blank-line runs and consecutive duplicate lines collapsed. " +
       "Use to check what is on a pane's screen right now, or to capture final output after a command finished. " +
+
       "When the output exceeds max_lines, the tail (last lines) is returned by default — for terminal output the tail is what matters.",
     promptSnippet: "Read the current or full output of a zellij pane (tail kept when capped)",
     promptGuidelines: [
@@ -548,8 +689,9 @@ export default function zellijExtension(pi: ExtensionAPI) {
       const paneId = normalizePaneId(params.pane_id);
       const output = await dumpPane(paneId, params.full !== false, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal);
       return {
-        content: [{ type: "text", text: output.text + (output.truncated ? "\n... [truncated]" : "") }],
-        details: { pane_id: paneId, truncated: output.truncated, lines: output.text.split("\n").length },
+        content: [{ type: "text", text: output.text + capNote(output) }],
+        details: { pane_id: paneId, truncated: output.truncated, compressed_lines: output.compressed, lines: output.text.split("\n").length },
+
       };
     },
   });
@@ -702,9 +844,10 @@ export default function zellijExtension(pi: ExtensionAPI) {
       const hit = existing.text.split("\n").find((line) => (rx ? rx.test(line) : line.includes(params.pattern)));
       if (hit) {
         return {
-          content: [{ type: "text", text: `Matched in 0.0s (already on screen): ${hit.trim()}` }],
+          content: [{ type: "text", text: `Matched in 0.0s (already on screen): ${showLine(hit.trim())}` }],
           details: { pane_id: params.pane_id, matched: true, elapsed_ms: 0, line: hit.trim() },
         };
+
       }
       const res = await waitForPattern(
         params.pane_id,
@@ -752,8 +895,9 @@ export default function zellijExtension(pi: ExtensionAPI) {
         };
       }
       return {
-        content: [{ type: "text", text: `Matched in ${(res.elapsedMs / 1000).toFixed(1)}s: ${res.line}` }],
+        content: [{ type: "text", text: `Matched in ${(res.elapsedMs / 1000).toFixed(1)}s: ${showLine(res.line ?? "")}` }],
         details: { pane_id: params.pane_id, matched: true, elapsed_ms: res.elapsedMs, line: res.line },
+
       };
     },
   });
@@ -862,12 +1006,15 @@ export default function zellijExtension(pi: ExtensionAPI) {
       }
       const panes = await listPanes(sessionArgs);
       const text = panes
-        .map(
-          (p) =>
-            `terminal_${p.id} [${p.is_focused ? "focused" : "     "}${p.exited ? " exited" : " running"}] ` +
-            `${p.exit_status !== null ? `status=${p.exit_status} ` : ""}"${p.title}" ${p.pane_command ?? ""} ${p.pane_cwd ?? ""}`,
-        )
+        .map((p) => {
+          const id = `terminal_${p.id}`.padEnd(11);
+          const state = (p.exited ? "exited" : "running").padEnd(8);
+          const status = p.exit_status !== null ? `status=${p.exit_status}`.padEnd(9) : " ".repeat(9);
+          const focus = p.is_focused ? " [focused]" : "";
+          return `${id} ${state} ${status} "${p.title}" ${p.pane_command ?? ""} ${p.pane_cwd ?? ""}${focus}`;
+        })
         .join("\n");
+
       return {
         content: [{ type: "text", text: text || "(no panes)" }],
         details: { panes: panes.map((p) => ({ ...p, id: `terminal_${p.id}` })) },
@@ -895,6 +1042,35 @@ export default function zellijExtension(pi: ExtensionAPI) {
       const { stdout, code } = await runZellij([...sessionArgs, "action", "close-pane", "--pane-id", paneId], { signal });
       if (code !== 0) throw new Error(`close-pane failed: ${stdout}`);
       return { content: [{ type: "text", text: `Closed pane ${paneId}.` }], details: { pane_id: paneId } };
+    },
+  });
+  // ---------------------------------------------------------------------------
+  // /zellij-pi — open a new pi in a new zellij pane/tab, optionally in a workspace
+  // ---------------------------------------------------------------------------
+
+  pi.registerCommand("zellij-pi", {
+    description:
+      "Open a new pi instance in a new zellij pane (or tab with --tab). " +
+      "Flags: --cwd <dir> (default: current dir), --workspace [name] (a workspace under ~/opt; created with jj/git init if missing).",
+    handler: async (args: string, ctx) => {
+      if (!process.env.ZELLIJ) {
+        ctx.ui.notify("/zellij-pi only works inside a zellij session", "error");
+        return;
+      }
+      const a = parseZpArgs(args);
+      let dir = a.cwd ?? ctx.cwd;
+      if (a.workspaceSet) {
+        const ws = await resolveWorkspace(a.workspace, ctx, pi);
+        if (!ws) return; // user cancelled
+        dir = ws;
+      }
+      const target = a.tab ? "new-tab" : "new-pane";
+      const res = await runZellij(["action", target, "--cwd", dir, "--name", "pi", "--", "pi"]);
+      if (res.killed || res.code !== 0) {
+        ctx.ui.notify(`Failed to open pi in a new ${target}: ${res.stderr || res.stdout || `exit ${res.code}`}`, "error");
+        return;
+      }
+      ctx.ui.notify(`pi opened in ${target} at ${dir}`, "info");
     },
   });
 }

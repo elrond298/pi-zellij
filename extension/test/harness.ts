@@ -13,7 +13,9 @@ const tools = new Map<string, { execute: Function; parameters: unknown }>();
 const fakePi = {
   registerTool: (def: { name: string; execute: Function; parameters: unknown }) =>
     tools.set(def.name, def),
+  registerCommand: () => {},
 } as never;
+
 
 ext(fakePi as never);
 console.log(`loaded tools: ${[...tools.keys()].join(", ")}`);
@@ -117,6 +119,31 @@ async function call(name: string, params: Record<string, unknown>) {
   check("dump: head when tail=false", head.content.includes("1") && !head.content.includes("60"), head.content.slice(0, 150));
   await call("zellij_close", { pane_id: pid, session: SESSION });
 }
+
+// --- display compression: blank runs + consecutive duplicates collapsed ----------
+{
+  const r = await call("zellij_run", { command: "printf 'A\\n\\n\\n\\nB\\nB\\nB\\nC\\n'", session: SESSION, timeout: 30 });
+  const pid = r.details.pane_id as string;
+  const d = await call("zellij_dump", { pane_id: pid, max_lines: 50, session: SESSION });
+  check("dump: blank+dup lines collapsed", d.content.includes("A\n\nB\nC") && !d.content.includes("B\nB"), JSON.stringify(d.content.slice(0, 150)));
+  // count is pty-dependent (zellij may coalesce blank rows); >= 3 proves both kinds collapsed
+  check("dump: compression counted", (d.details.compressed_lines as number) >= 3, JSON.stringify(d.details));
+
+  await call("zellij_close", { pane_id: pid, session: SESSION });
+}
+
+// --- matched-line display: very long lines capped in content, full in details ----
+{
+  const r = await call("zellij_run", { command: "printf 'X%.0s' $(seq 1 1000); echo; sleep 20", wait: "none", session: SESSION });
+  const pid = r.details.pane_id as string;
+  const w = await call("zellij_wait", { pane_id: pid, pattern: "XXXXXXXXXX", timeout: 10, session: SESSION });
+  check("wait: long matched line capped in content", w.content.includes("line truncated") && (w.content.match(/X/g) ?? []).length <= 200, w.content.slice(0, 260));
+  // long lines may be wrapped by the pty mid-dump; contract is: content capped, details carries more than the capped display
+  check("wait: full line kept in details", String(w.details.line ?? "").length > 200, JSON.stringify(w.details.line ?? "").slice(0, 120));
+
+  await call("zellij_close", { pane_id: pid, session: SESSION });
+}
+
 
 // --- zellij_run: target=tab ------------------------------------------------------
 {
