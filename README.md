@@ -4,13 +4,10 @@ Reliable zellij control for pi: a skill (reference + helper scripts) and a pi ex
 
 ## Layout
 
-```
-skill/SKILL.md             # skill entry: session targeting, blocking, decision table
-skill/references/cli-actions.md # full CLI reference, loaded on demand
-skill/scripts/wait-for-pattern.sh # subscribe-based "wait for output" helper
-extension/                # pi extension — 7 tools (see below)
+extension/src/index.ts    # pi extension — 7 tools + /zellij-pi (see below)
+extension/skills/zellij/  # skill bundled in the package: SKILL.md + references/ + scripts/
 extension/test/harness.ts # tool tests against a live zellij session
-install.sh                # copy skill → ~/.agents/skills/zellij, re-register extension
+install.sh                # register the package with pi (extension + bundled skill)
 ```
 
 ## Install
@@ -19,7 +16,7 @@ install.sh                # copy skill → ~/.agents/skills/zellij, re-register 
 ./install.sh
 ```
 
-The skill lands in `~/.agents/skills/zellij/` (auto-discovered). The extension is registered with `pi install` (package entry pointing at this repo).
+The package registers the extension (7 tools + `/zellij-pi`) **and** the bundled zellij skill (`pi.skills` in `extension/package.json`); the skill is discovered from this repo directly, so edits take effect without re-installing.
 
 ## Extension tools
 
