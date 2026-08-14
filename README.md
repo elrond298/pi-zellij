@@ -11,19 +11,17 @@ Requirements: pi, zellij ≥ 0.40.
 | **Extension** | `src/` | 7 custom tools that wrap `zellij action`/`subscribe` with reliability built in (real exit codes, timeouts, no sleep-guessing), plus the `/zellij-pi` slash command |
 | **Skill** | `skills/zellij/` | Teaches pi to drive zellij through subprocess calls — no socket or library. Loads whenever pi needs to run something in a pane, read pane output, or manage panes/sessions |
 | Tests | `test/` | Live-session tests for the tools and the slash command |
-| Installer | `install.sh` | Registers the package with pi |
 | Package manifest | `package.json` | The pi package structure — `pi.extensions` / `pi.skills` point at the extension and skill |
-
 
 ## Installation
 
 ```bash
 git clone <repo-url> pi-zellij
 cd pi-zellij
-./install.sh
+pi install .
 ```
 
-`install.sh` runs `pi install <repo>` (idempotent) and removes the stale pre-package skill copy at `~/.agents/skills/zellij`. The skill is discovered from this repo directly, so editing `skills/zellij/` takes effect without re-installing; extension code changes need `./install.sh` again.
+Idempotent — re-run after pulling updates. The skill is discovered from this repo directly, so editing `skills/zellij/` takes effect without re-installing; extension code changes need `pi install .` again.
 
 ## Extension
 
@@ -68,5 +66,5 @@ The repo is jj-managed (colocated git). Commit, then re-install:
 
 ```bash
 jj commit -m "message" <paths>
-./install.sh
+pi install .
 ```
