@@ -64,9 +64,8 @@ zellij action dump-screen --pane-id terminal_1 --full   # capture final output
 |---|---|
 | `--blocking` | Command finished **and** pane closed (Ctrl-c or `close-pane`) — review-then-continue flows |
 | `--block-until-exit` | Command exits, any status |
-| `--block-until-exit-success` | Command exits 0. On failure the pane stays open; `Enter` retries the command, caller stays blocked |
-| `--block-until-exit-failure` | Command exits non-zero. On success the pane stays open; `Enter` retries, caller stays blocked |
-
+| `--block-until-exit-success` | Command exits 0. On failure the pane stays open; the docs' Enter-to-retry does **not** work via `send-keys` on 0.44 — see caveat below |
+| `--block-until-exit-failure` | Command exits non-zero. On success the pane stays open; Enter-to-retry caveat applies |
 Retry semantics make multi-step pipelines with human/agent intervention natural:
 
 ```bash
@@ -113,8 +112,6 @@ for _ in $(seq 1 24); do               # 24 × 5 s ≈ 120 s max wait
   [ "$EXITED" = "true" ] && break
   sleep 5
 done
-zellij action dump-screen --pane-id terminal_3 --full   # final output
-```
 zellij action dump-screen --pane-id terminal_3 --full   # final output
 ```
 
