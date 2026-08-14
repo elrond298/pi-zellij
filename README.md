@@ -5,18 +5,18 @@ Reliable zellij control for pi: a skill (reference + helper scripts) and a pi ex
 ## Layout
 
 ```
-SKILL.md                  # skill entry: session targeting, blocking, decision table
-references/cli-actions.md # full CLI reference, loaded on demand
-scripts/wait-for-pattern.sh  # subscribe-based "wait for output" helper
+skill/SKILL.md             # skill entry: session targeting, blocking, decision table
+skill/references/cli-actions.md # full CLI reference, loaded on demand
+skill/scripts/wait-for-pattern.sh # subscribe-based "wait for output" helper
 extension/                # pi extension — 7 tools (see below)
 extension/test/harness.ts # tool tests against a live zellij session
-sync.sh                   # copy skill → ~/.agents/skills/zellij, re-register extension
+install.sh                # copy skill → ~/.agents/skills/zellij, re-register extension
 ```
 
 ## Install
 
 ```bash
-./sync.sh
+./install.sh
 ```
 
 The skill lands in `~/.agents/skills/zellij/` (auto-discovered). The extension is registered with `pi install` (package entry pointing at this repo).
@@ -50,8 +50,8 @@ cd extension && node --experimental-strip-types test/command-test.ts   # /zellij
 ```
 ## Repo workflow
 
-jj-managed (colocated git). Commit, then `./sync.sh`:
+jj-managed (colocated git). Commit, then `./install.sh`:
 ```bash
 jj commit -m "message" <paths>
-./sync.sh
+./install.sh
 ```
