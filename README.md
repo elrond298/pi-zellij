@@ -4,7 +4,7 @@ Reliable zellij control for pi: a skill (reference + helper scripts) and a pi ex
 
 ## Layout
 
-extension/src/index.ts    # pi extension — 7 tools + /zellij-pi (see below)
+extension/src/            # pi extension — modular: cli.ts, wait.ts, output.ts, workspace.ts, tools.ts, command.ts, index.ts (entry)
 extension/skills/zellij/  # skill bundled in the package: SKILL.md + references/ + scripts/
 extension/test/harness.ts # tool tests against a live zellij session
 install.sh                # register the package with pi (extension + bundled skill)
