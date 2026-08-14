@@ -396,87 +396,125 @@ function parseZpArgs(args: string): ZpArgs {
 }
 
 /** Existing workspaces: ~/opt entries whose target holds a .git or .jj dir. */
-async function listWorkspaces(optDir: string): Promise<{ name: string; vcs: string }[]> {
-  let entries: fs.Dirent[] = [];
+/** Existing workspaces: ~/.worktrees/<project>/<ws> directories. */
+async function listWorkspaces(root: string): Promise<{ name: string; vcs: string }[]> {
+  const out: { name: string; vcs: string }[] = [];
+  let projects: fs.Dirent[] = [];
   try {
-    entries = await fs.promises.readdir(optDir, { withFileTypes: true });
+    projects = await fs.promises.readdir(root, { withFileTypes: true });
   } catch {
     return [];
   }
-  const out: { name: string; vcs: string }[] = [];
-  for (const e of entries) {
-    let dir = path.join(optDir, e.name);
+  for (const p of projects) {
+    if (!p.isDirectory()) continue;
+    let workspaces: fs.Dirent[] = [];
     try {
-      if (e.isSymbolicLink()) dir = await fs.promises.realpath(dir);
-      if (!(await fs.promises.stat(dir)).isDirectory()) continue;
-      const vcs = fs.existsSync(path.join(dir, ".jj")) ? "jj" : fs.existsSync(path.join(dir, ".git")) ? "git" : null;
-      if (vcs) out.push({ name: e.name, vcs });
+      workspaces = await fs.promises.readdir(path.join(root, p.name), { withFileTypes: true });
     } catch {
-      // dangling symlink or unreadable — skip
+      continue;
+    }
+    for (const w of workspaces) {
+      if (!w.isDirectory()) continue;
+      const dir = path.join(root, p.name, w.name);
+      const vcs = fs.existsSync(path.join(dir, ".jj")) ? "jj" : fs.existsSync(path.join(dir, ".git")) ? "git" : "none";
+      out.push({ name: `${p.name}/${w.name}`, vcs });
     }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** Nearest enclosing jj or git repo, walking up from start. */
+async function findRepo(start: string): Promise<{ root: string; vcs: "jj" | "git" } | null> {
+  let dir = start;
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".jj"))) return { root: dir, vcs: "jj" };
+    if (fs.existsSync(path.join(dir, ".git"))) return { root: dir, vcs: "git" };
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
 /**
- * Resolve a workspace under ~/opt. Convention: ~/opt entries are symlinks to
- * ~/WORK/opt/<name>. If the workspace is missing, create it interactively
- * (real dir + symlink, jj or git init). Returns null if the user cancels.
+ * Resolve a workspace under ~/.worktrees/<project>/<ws>, following the
+ * pi-worktree convention (default root ~/.worktrees/<main-worktree-name>/<branch>).
+ * "project/ws" may be given explicitly; a bare name uses the repo at ctx.cwd
+ * (or the cwd basename when not in a repo). Creation: git repo → `git worktree
+ * add -b <ws>` (attaches if the branch exists), jj repo → `jj workspace add`,
+ * no repo → plain mkdir + jj/git init. Returns the workspace dir or null.
  */
 async function resolveWorkspace(
   name: string | undefined,
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
 ): Promise<string | null> {
-  const optDir = path.join(os.homedir(), "opt");
+  const root = path.join(os.homedir(), ".worktrees");
   if (!name) {
-    const existing = await listWorkspaces(optDir);
+    const existing = await listWorkspaces(root);
     const pick = await ctx.ui.select(
-      "Workspace (under ~/opt):",
+      "Workspace (under ~/.worktrees):",
       [...existing.map((w) => `${w.name} (${w.vcs})`), "＋ create new workspace"],
     );
     if (!pick) return null;
-    if (pick === "＋ create new workspace") {
-      name = await ctx.ui.input("New workspace name:", "e.g. pi-worktree");
-      if (!name?.trim()) return null;
-      name = name.trim();
-    } else {
-      return path.join(optDir, pick.split(" ")[0]);
-    }
+    if (pick !== "＋ create new workspace") return path.join(root, ...pick.split(" ")[0].split("/"));
+    name = await ctx.ui.input("New workspace (project/name):", "e.g. zellij-skill/experiment");
+    if (!name?.trim()) return null;
+    name = name.trim();
   }
-  const link = path.join(optDir, name);
-  if (fs.existsSync(link)) return link;
+  const parts = name.split("/").filter(Boolean);
+  if (parts.length < 2) {
+    const repo = await findRepo(ctx.cwd);
+    const base = path.basename(ctx.cwd);
+    parts.unshift(repo ? path.basename(repo.root) : base === path.basename(os.homedir()) ? "workspaces" : base);
+  }
+  const dir = path.join(root, ...parts);
+  if (fs.existsSync(dir)) {
+    ctx.ui.notify(`Workspace: ${dir}`, "info");
+    return dir;
+  }
+
+  const repo = await findRepo(ctx.cwd);
+  if (repo) {
+    const ok = await ctx.ui.confirm(
+      "Create workspace",
+      `${dir} does not exist. Create a ${repo.vcs} worktree there from ${repo.root} and open pi?`,
+    );
+    if (!ok) return null;
+    await fs.promises.mkdir(path.dirname(dir), { recursive: true });
+    let res =
+      repo.vcs === "jj"
+        ? await pi.exec("jj", ["workspace", "add", dir], { cwd: repo.root })
+        : await pi.exec("git", ["worktree", "add", dir, "-b", parts[parts.length - 1]], { cwd: repo.root });
+    if (res.code !== 0 && repo.vcs === "git") {
+      // branch already exists — attach instead of creating a new one
+      res = await pi.exec("git", ["worktree", "add", dir], { cwd: repo.root });
+    }
+    if (res.code !== 0) {
+      ctx.ui.notify(`workspace add failed: ${res.stderr}`, "error");
+      return null;
+    }
+    ctx.ui.notify(`Workspace ready: ${dir} (${repo.vcs})`, "info");
+    return dir;
+  }
 
   const ok = await ctx.ui.confirm(
     "Create workspace",
-    `${link} does not exist. Create it (with a jj or git repo) and open pi there?`,
+    `${dir} does not exist. Create it (with a jj or git repo) and open pi there?`,
   );
   if (!ok) return null;
   const vcs = await ctx.ui.select("Version control:", ["jj (recommended)", "git"]);
   if (!vcs) return null;
-
-  // Follow the ~/opt → ~/WORK/opt symlink convention when WORK/opt exists.
-  const workOpt = path.join(os.homedir(), "WORK", "opt");
-  const real = fs.existsSync(workOpt) ? path.join(workOpt, name) : link;
-  await fs.promises.mkdir(real, { recursive: true });
-  if (real !== link) {
-    try {
-      await fs.promises.symlink(real, link);
-    } catch {
-      // symlink already raced us — fine, link now points at the dir
-    }
-  }
-
+  await fs.promises.mkdir(dir, { recursive: true });
   const bin = vcs.startsWith("jj") ? "jj" : "git";
   // `jj git init` works on both old and new jj; plain `jj init` was removed in newer versions.
   const initArgs = vcs.startsWith("jj") ? ["git", "init"] : ["init"];
-  const res = await pi.exec(bin, initArgs, { cwd: real });
+  const res = await pi.exec(bin, initArgs, { cwd: dir });
   if (res.code !== 0) {
-    ctx.ui.notify(`${bin} init failed in ${real}: ${res.stderr}`, "error");
+    ctx.ui.notify(`${bin} init failed in ${dir}: ${res.stderr}`, "error");
     return null;
   }
-  ctx.ui.notify(`Workspace ready: ${link} (${vcs})`, "info");
-  return link;
+  ctx.ui.notify(`Workspace ready: ${dir} (${vcs})`, "info");
+  return dir;
 }
 
 function capOutput(text: string, maxLines: number, keepTail: boolean): { text: string; truncated: boolean; compressed: number } {
@@ -1051,7 +1089,7 @@ export default function zellijExtension(pi: ExtensionAPI) {
   pi.registerCommand("zellij-pi", {
     description:
       "Open a new pi instance in a new zellij pane (or tab with --tab). " +
-      "Flags: --cwd <dir> (default: current dir), --workspace [name] (a workspace under ~/opt; created with jj/git init if missing).",
+      "Flags: --cwd <dir> (default: current dir), --workspace [project/]name (a workspace under ~/.worktrees/<project>/<name>; a git repo creates a git worktree, a jj repo adds a jj workspace, otherwise mkdir + jj/git init).",
     handler: async (args: string, ctx) => {
       if (!process.env.ZELLIJ) {
         ctx.ui.notify("/zellij-pi only works inside a zellij session", "error");

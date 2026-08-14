@@ -3,7 +3,7 @@
  * so `zellij action new-pane` targets the live session.
  * Run:  node --experimental-strip-types test/command-test.ts
  */
-import { execFile } from "node:child_process";
+import { execFile, execFileSync as execFs } from "node:child_process";
 import { promisify } from "node:util";
 import { default as ext } from "../src/index.ts";
 
@@ -34,15 +34,20 @@ if (!process.env.ZELLIJ) {
   process.exit(0);
 }
 
+const HOME = "/home/elrond";
+const PROJ = "zellij-skill"; // repo at ctx.cwd (jj colocated)
+const WS = "zp-cmd-test";
+const wsDir = `${HOME}/.worktrees/${PROJ}/${WS}`;
+
 let failures = 0;
 const notifies: { level: string; msg: string }[] = [];
 function fakeCtx(over: Record<string, unknown> = {}) {
   return {
-    cwd: "/home/elrond",
+    cwd: `${HOME}/opt/${PROJ}/extension`, // inside the zellij-skill repo
     ui: {
       notify: (msg: string, level: string) => notifies.push({ level, msg }),
       select: async (_t: string, opts: string[]) => over.select ?? opts[0],
-      input: async () => over.input ?? "zp-cmd-test",
+      input: async () => over.input ?? WS,
       confirm: async () => over.confirm ?? true,
     },
     ...over,
@@ -62,6 +67,13 @@ async function closePane(id: number | string) {
     execFileSync("zellij", ["action", "close-pane", "--pane-id", String(id)], { stdio: "ignore" });
   } catch {}
 }
+function jj(args: string[]) {
+  try {
+    return execFs("jj", args, { cwd: `${HOME}/opt/${PROJ}`, encoding: "utf8" });
+  } catch (e: any) {
+    return `ERR ${e.stderr ?? ""}`;
+  }
+}
 
 // --- case 1: --cwd opens a new pane named pi with the given cwd -----------------
 notifies.length = 0;
@@ -72,37 +84,72 @@ const cwdPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd === "/tmp"
 check("cwd: pi pane created with cwd /tmp", !!cwdPane, JSON.stringify((panes as any[]).map((p) => [p.id, p.title, p.pane_cwd])));
 if (cwdPane) await closePane(cwdPane.id);
 
-// --- case 2: --tab --workspace <new> creates workspace + opens a tab ------------
+// --- case 2: --tab --workspace <new> creates a jj workspace + opens a tab --------
 notifies.length = 0;
-await cmd.handler("--tab --workspace zp-cmd-test", fakeCtx());
-check("workspace: notified success", notifies.some((n) => n.level === "info" && n.msg.includes("zp-cmd-test")), JSON.stringify(notifies));
-const { existsSync, readdirSync } = await import("node:fs");
-const os = await import("node:os");
-const path = await import("node:path");
-const link = path.join(os.homedir(), "opt", "zp-cmd-test");
-const real = path.join(os.homedir(), "WORK", "opt", "zp-cmd-test");
-check("workspace: symlink created", existsSync(link) && existsSync(real), `${link} -> ${real}`);
-check("workspace: jj repo initialized", existsSync(path.join(real, ".jj")) || readdirSync(real).includes(".jj"), "");
+await cmd.handler(`--tab --workspace ${WS}`, fakeCtx());
+check("workspace: notified success", notifies.some((n) => n.level === "info" && n.msg.includes(wsDir)), JSON.stringify(notifies));
+const { existsSync } = await import("node:fs");
+check("workspace: dir created", existsSync(wsDir), wsDir);
+check("workspace: jj workspace registered", jj(["workspace", "list"]).includes(`.worktrees/${PROJ}/${WS}`), jj(["workspace", "list"]).slice(0, 120));
 panes = await listPanes();
-const wsPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes("zp-cmd-test"));
+const wsPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes(WS));
 check("workspace: pi pane in tab with workspace cwd", !!wsPane, JSON.stringify((panes as any[]).map((p) => [p.id, p.title, p.pane_cwd])));
 if (wsPane) await closePane(wsPane.id);
 
-// --- case 3: --workspace (no name) picks an existing workspace ------------------
+// --- case 3: --workspace (no name) picks an existing workspace -------------------
 notifies.length = 0;
-await cmd.handler("--workspace", fakeCtx({ select: "pi-worktree (git)" }));
-check("workspace pick: existing chosen", notifies.some((n) => n.level === "info" && n.msg.includes("pi-worktree")), JSON.stringify(notifies));
+await cmd.handler("--workspace", fakeCtx({ select: `${PROJ}/${WS} (jj)` }));
+check("workspace pick: existing chosen", notifies.some((n) => n.level === "info" && n.msg.includes(wsDir)), JSON.stringify(notifies));
 panes = await listPanes();
-const pickPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes("pi-worktree"));
+const pickPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes(WS));
 if (pickPane) await closePane(pickPane.id);
 
-// --- case 4: --workspace (no name) + create new --------------------------------
+// --- case 4: --workspace (no name) + create new reuses existing dir --------------
 notifies.length = 0;
-await cmd.handler("--workspace", fakeCtx({ select: "＋ create new workspace", input: "zp-cmd-test" }));
-check("workspace create: reuses existing dir", notifies.some((n) => n.msg.includes("zp-cmd-test")), "");
+await cmd.handler("--workspace", fakeCtx({ select: "＋ create new workspace", input: WS }));
+check("workspace create: reuses existing dir", notifies.some((n) => n.msg.includes(wsDir)), "");
 panes = await listPanes();
-const createPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes("zp-cmd-test"));
+const createPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes(WS));
 if (createPane) await closePane(createPane.id);
+
+// --- case 5: explicit project/ws slash syntax ------------------------------------
+notifies.length = 0;
+await cmd.handler(`--workspace ${PROJ}/${WS}`, fakeCtx());
+check("workspace slash: existing resolved", notifies.some((n) => n.level === "info" && n.msg.includes(wsDir)), JSON.stringify(notifies));
+panes = await listPanes();
+const slashPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes(WS));
+if (slashPane) await closePane(slashPane.id);
+// --- case 6: git repo → git worktree add ----------------------------------------
+const GIT_REPO = "/tmp/zp-git-test";
+execFs("rm", ["-rf", GIT_REPO]);
+execFs("git", ["init", "-q", GIT_REPO]);
+execFs("git", ["-C", GIT_REPO, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+notifies.length = 0;
+await cmd.handler(`--workspace ${WS}`, fakeCtx({ cwd: GIT_REPO }));
+check("git ws: notified success", notifies.some((n) => n.level === "info" && n.msg.includes("zp-git-test")), JSON.stringify(notifies));
+const gitWsDir = `${HOME}/.worktrees/zp-git-test/${WS}`;
+check("git ws: dir created", existsSync(gitWsDir), gitWsDir);
+check(
+  "git ws: worktree registered",
+  execFs("git", ["-C", GIT_REPO, "worktree", "list"], { encoding: "utf8" }).includes(gitWsDir),
+  execFs("git", ["-C", GIT_REPO, "worktree", "list"], { encoding: "utf8" }).slice(0, 120),
+);
+panes = await listPanes();
+const gitPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes(gitWsDir));
+check("git ws: pi pane with worktree cwd", !!gitPane, JSON.stringify((panes as any[]).map((p) => [p.id, p.title, p.pane_cwd])));
+if (gitPane) await closePane(gitPane.id);
+// cleanup git repo
+try {
+  execFs("git", ["-C", GIT_REPO, "worktree", "remove", gitWsDir]);
+  execFs("git", ["-C", GIT_REPO, "branch", "-D", WS]);
+} catch {}
+execFs("rm", ["-rf", GIT_REPO, gitWsDir]);
+// --- cleanup: forget the jj workspace (by name) and remove the dir ----------------
+console.log("cleanup:", jj(["workspace", "forget", WS]).slice(0, 80));
+const { execFileSync } = await import("node:child_process");
+try {
+  execFileSync("rm", ["-rf", wsDir]);
+} catch {}
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

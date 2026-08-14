@@ -39,9 +39,8 @@ All tools auto-resolve the session: explicit `session` (auto-created headless if
 
 `/zellij-pi` (works inside a zellij session) opens a new pi in a new pane (or tab with `--tab`):
 
-- `--cwd <dir>` — working directory for the new pi (default: current dir)
-- `--workspace [name]` — a workspace under `~/opt` (existing or created); without a name, pick interactively from existing workspaces or create one
-- Creating a workspace follows the `~/opt → ~/WORK/opt` symlink convention and inits a repo (`jj git init` or `git init`, chosen interactively)
+- `--workspace [project/]name` — a workspace under `~/.worktrees/<project>/<name>` (the pi-worktree convention); without a name, pick interactively from existing workspaces or create one
+- Creating a workspace mirrors pi-worktree's behavior: a git repo creates a `git worktree add -b <name>` worktree (attaches if the branch exists), a jj repo adds a `jj workspace add` workspace, and a bare directory (no repo at the current cwd) falls back to `mkdir` + `jj git init`/`git init`. A bare name uses the repo at the current cwd as the project; pass `project/name` explicitly for another project
 
 ## Test
 
