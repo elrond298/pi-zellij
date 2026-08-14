@@ -35,7 +35,7 @@ if (!process.env.ZELLIJ) {
 }
 
 const HOME = "/home/elrond";
-const PROJ = "zellij-skill"; // repo at ctx.cwd (jj colocated)
+const PROJ = "pi-zellij"; // repo at ctx.cwd (jj colocated)
 const WS = "zp-cmd-test";
 const wsDir = `${HOME}/.worktrees/${PROJ}/${WS}`;
 
@@ -43,7 +43,7 @@ let failures = 0;
 const notifies: { level: string; msg: string }[] = [];
 function fakeCtx(over: Record<string, unknown> = {}) {
   return {
-    cwd: `${HOME}/opt/${PROJ}/extension`, // inside the zellij-skill repo
+    cwd: `${HOME}/opt/${PROJ}/extension`, // inside the pi-zellij repo
     ui: {
       notify: (msg: string, level: string) => notifies.push({ level, msg }),
       select: async (_t: string, opts: string[]) => over.select ?? opts[0],
@@ -119,6 +119,19 @@ check("workspace slash: existing resolved", notifies.some((n) => n.level === "in
 panes = await listPanes();
 const slashPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd?.includes(WS));
 if (slashPane) await closePane(slashPane.id);
+// --- case 6a: .. segments are rejected -----------------------------------------
+notifies.length = 0;
+await cmd.handler("--workspace ../evil", fakeCtx());
+check(
+  "workspace: .. rejected",
+  notifies.some((n) => n.level === "error" && n.msg.includes("..")),
+  JSON.stringify(notifies),
+);
+panes = await listPanes();
+if (panes.some((p: any) => p.title === "pi")) {
+  check("workspace: no pane opened for ..", false, "a pi pane was opened despite rejection");
+}
+
 // --- case 6: git repo → git worktree add ----------------------------------------
 const GIT_REPO = "/tmp/zp-git-test";
 execFs("rm", ["-rf", GIT_REPO]);

@@ -31,6 +31,14 @@ async function call(name: string, params: Record<string, unknown>) {
   const res = await tool.execute("test", params, undefined);
   return { content: res.content?.[0]?.text ?? "", details: res.details ?? {} };
 }
+async function callExpectError(name: string, params: Record<string, unknown>): Promise<boolean> {
+  try {
+    await call(name, params);
+    return false; // no error thrown — failure
+  } catch {
+    return true;
+  }
+}
 
 // --- session resolution: auto-create explicit session -----------------------
 {
@@ -250,6 +258,21 @@ async function call(name: string, params: Record<string, unknown>) {
     JSON.stringify(r4.details).slice(0, 300),
   );
   await call("zellij_close", { pane_id: r4.details.pane_id as string, session: SESSION });
+}
+
+
+// --- send to a nonexistent pane must throw, not claim success -----------------
+{
+  check("send: invalid pane throws", await callExpectError("zellij_send", { pane_id: "terminal_999999", text: "x", session: SESSION }));
+}
+
+// --- pre-aborted signal must not crash the wait (TDZ guard) -------------------
+{
+  const tool = tools.get("zellij_wait")!;
+  const aborted = new AbortController();
+  aborted.abort();
+  const res = await tool.execute("test", { pane_id: "terminal_1", pattern: "NEVER", timeout: 5, session: SESSION }, aborted.signal);
+  check("wait: pre-aborted signal returns timeout", res.details?.matched === false, JSON.stringify(res.details ?? {}).slice(0, 200));
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);

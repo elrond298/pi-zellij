@@ -37,6 +37,8 @@ function runZellij(
     let stdout = "";
     let stderr = "";
     let settled = false;
+    // Bounded default: no short CLI call should hang the caller past its own timeout.
+    const timeoutMs = opts.timeoutMs ?? 15_000;
 
     const finish = (fn: () => void) => {
       if (settled) return;
@@ -44,11 +46,11 @@ function runZellij(
       fn();
     };
 
-    const timer = opts.timeoutMs
+    const timer = timeoutMs
       ? setTimeout(() => {
           child.kill("SIGKILL");
           finish(() => resolve({ stdout, stderr, code: null, killed: true }));
-        }, opts.timeoutMs)
+        }, timeoutMs)
       : undefined;
 
     const onAbort = () => {
@@ -212,23 +214,27 @@ async function waitForPattern(
   sessionArgs: string[],
   signal?: AbortSignal,
 ): Promise<WaitOutcome> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn("zellij", [...sessionArgs, "subscribe", "--pane-id", paneId], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let buf = "";
     let done = false;
+    // Declared before finish so a pre-aborted signal can't hit a TDZ ReferenceError.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let watchdog: ReturnType<typeof setInterval> | undefined;
 
     const finish = (outcome: WaitOutcome) => {
       if (done) return;
       done = true;
-      clearInterval(watchdog);
+      if (watchdog) clearInterval(watchdog);
+      if (timer) clearTimeout(timer);
       child.kill("SIGKILL");
       resolve(outcome);
     };
 
     const start = Date.now();
-    const timer = setTimeout(
+    timer = setTimeout(
       () => finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false }),
       timeoutMs,
     );
@@ -239,11 +245,10 @@ async function waitForPattern(
 
     // Terminal-state watchdog: if the pane's process exits while we wait for output,
     // return that state instead of burning the full timeout.
-    const watchdog = setInterval(async () => {
+    watchdog = setInterval(async () => {
       if (done) return;
       const st = await paneExitState(sessionArgs, paneId);
       if (st?.exited) {
-        clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
         finish({
           status: "exited",
@@ -253,7 +258,6 @@ async function waitForPattern(
         });
       }
     }, 500);
-
     child.stdout.on("data", (d) => {
       buf += d;
       let line: string;
@@ -261,17 +265,18 @@ async function waitForPattern(
         buf = buf.slice(line.length + 1);
         const hit = regex ? new RegExp(pattern).test(line) : line.includes(pattern);
         if (hit) {
-          clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           finish({ status: "matched", line: line.trim(), elapsedMs: Date.now() - start, exit_status: null, removed: false });
           return;
         }
       }
     });
-    child.on("error", () => {
-      clearTimeout(timer);
+    child.on("error", (err) => {
+      // spawn failure (e.g. binary missing) — a real error, not a timeout
       signal?.removeEventListener("abort", onAbort);
-      finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
+      child.kill("SIGKILL");
+      done = true;
+      reject(new Error(`zellij subscribe failed: ${err.message}`));
     });
     child.on("close", async () => {
       // subscriber exited (e.g. pane closed) — flush remaining buffer
@@ -303,23 +308,26 @@ async function waitForIdle(
   sessionArgs: string[],
   signal?: AbortSignal,
 ): Promise<WaitOutcome> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn("zellij", [...sessionArgs, "subscribe", "--pane-id", paneId], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let done = false;
     let lastChange = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let watchdog: ReturnType<typeof setInterval> | undefined;
 
     const finish = (outcome: WaitOutcome) => {
       if (done) return;
       done = true;
-      clearInterval(watchdog);
+      if (watchdog) clearInterval(watchdog);
+      if (timer) clearTimeout(timer);
       child.kill("SIGKILL");
       resolve(outcome);
     };
 
     const start = Date.now();
-    const timer = setTimeout(
+    timer = setTimeout(
       () => finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false }),
       timeoutMs,
     );
@@ -328,11 +336,10 @@ async function waitForIdle(
     if (signal?.aborted) onAbort();
     else signal?.addEventListener("abort", onAbort, { once: true });
 
-    const watchdog = setInterval(async () => {
+    watchdog = setInterval(async () => {
       if (done) return;
       const st = await paneExitState(sessionArgs, paneId);
       if (st?.exited) {
-        clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
         finish({
           status: "exited",
@@ -343,7 +350,6 @@ async function waitForIdle(
         return;
       }
       if (Date.now() - lastChange >= settleMs) {
-        clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
         finish({ status: "idle", elapsedMs: Date.now() - start, exit_status: null, removed: false });
       }
@@ -352,13 +358,22 @@ async function waitForIdle(
     child.stdout.on("data", (d) => {
       if (!done && d.length) lastChange = Date.now();
     });
-    child.on("error", () => {
-      clearTimeout(timer);
+    child.on("error", (err) => {
       signal?.removeEventListener("abort", onAbort);
-      finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
+      child.kill("SIGKILL");
+      done = true;
+      reject(new Error(`zellij subscribe failed: ${err.message}`));
     });
-    child.on("close", () => {
-      if (!done) finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
+    child.on("close", async () => {
+      if (!done) {
+        // subscriber died (pane closed or server hiccup) — prefer a terminal state
+        const st = await paneExitState(sessionArgs, paneId);
+        if (st?.exited) {
+          finish({ status: "exited", elapsedMs: Date.now() - start, exit_status: st.exit_status, removed: st.removed });
+        } else {
+          finish({ status: "timeout", elapsedMs: Date.now() - start, exit_status: null, removed: false });
+        }
+      }
     });
   });
 }
@@ -373,9 +388,18 @@ interface ZpArgs {
   workspaceSet: boolean;
 }
 
+/** Quote-aware tokenizer: --cwd "dir with spaces" stays one token. */
+function tokenize(args: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(args))) out.push(m[1] ?? m[2] ?? m[3]);
+  return out;
+}
+
 function parseZpArgs(args: string): ZpArgs {
   const out: ZpArgs = { tab: false, workspaceSet: false };
-  const toks = args.split(/\s+/).filter(Boolean);
+  const toks = tokenize(args);
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
     if (t === "--tab") out.tab = true;
@@ -457,11 +481,15 @@ async function resolveWorkspace(
     );
     if (!pick) return null;
     if (pick !== "＋ create new workspace") return path.join(root, ...pick.split(" ")[0].split("/"));
-    name = await ctx.ui.input("New workspace (project/name):", "e.g. zellij-skill/experiment");
+    name = await ctx.ui.input("New workspace (project/name):", "e.g. pi-zellij/experiment");
     if (!name?.trim()) return null;
     name = name.trim();
   }
   const parts = name.split("/").filter(Boolean);
+  if (parts.some((p) => p === "." || p === "..")) {
+    ctx.ui.notify("Workspace names must not contain . or .. path segments", "error");
+    return null;
+  }
   if (parts.length < 2) {
     const repo = await findRepo(ctx.cwd);
     const base = path.basename(ctx.cwd);
@@ -510,6 +538,8 @@ async function resolveWorkspace(
   const initArgs = vcs.startsWith("jj") ? ["git", "init"] : ["init"];
   const res = await pi.exec(bin, initArgs, { cwd: dir });
   if (res.code !== 0) {
+    // don't leave a bare dir that the next invocation would accept as a workspace
+    await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
     ctx.ui.notify(`${bin} init failed in ${dir}: ${res.stderr}`, "error");
     return null;
   }
@@ -529,9 +559,19 @@ function capOutput(text: string, maxLines: number, keepTail: boolean): { text: s
     }
     out.push(line);
   }
-  if (out.length <= maxLines) return { text: out.join("\n"), truncated: false, compressed };
-  const slice = keepTail ? out.slice(-maxLines) : out.slice(0, maxLines);
-  return { text: slice.join("\n"), truncated: true, compressed };
+  let truncated = false;
+  let slice = out;
+  if (out.length > maxLines) {
+    slice = keepTail ? out.slice(-maxLines) : out.slice(0, maxLines);
+    truncated = true;
+  }
+  let joined = slice.join("\n");
+  // Byte cap (pi tool-output guidance ~50KB): a single huge line must not blow past it.
+  if (joined.length > 60_000) {
+    joined = (keepTail ? joined.slice(-60_000) : joined.slice(0, 60_000)) + "\n... [output truncated by size]";
+    truncated = true;
+  }
+  return { text: joined, truncated, compressed };
 }
 
 function showLine(line: string): string {
@@ -633,10 +673,11 @@ export default function zellijExtension(pi: ExtensionAPI) {
         paneId = createdId;
       } else {
         // new-tab prints a bare tab id; resolve it to the command pane's id
-        tabId = Number(createdId);
-        if (!Number.isInteger(tabId)) {
+        // (require digits — Number("") would silently become 0 on a stale empty reply)
+        if (!/^\d+$/.test(createdId)) {
           throw new Error(`new-tab failed: ${created.stdout} ${created.stderr}`);
         }
+        tabId = Number(createdId);
         const panes = await listPanes(sessionArgs);
         const tabPane = panes.find((p) => p.tab_id === tabId);
         if (!tabPane) throw new Error(`new-tab created tab ${tabId} but no pane was found in it`);
@@ -764,19 +805,27 @@ export default function zellijExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
       const paneId = normalizePaneId(params.pane_id);
+      // zellij silently ignores paste/send-keys to a nonexistent pane (exit 0) — verify first
+      findPane(await listPanes(sessionArgs), paneId);
       const keys = [...(params.keys ?? [])];
       if (params.text && params.press_enter !== false) keys.unshift("Enter");
 
+      const send = async (args: string[]) => {
+        const res = await runZellij(args, { signal });
+        if (res.killed) throw new Error(`zellij action timed out: ${args.slice(2, 4).join(" ")}`);
+        if (res.code !== 0) throw new Error(`${args[3] ?? "action"} failed: ${res.stderr.trim() || res.stdout.trim()}`);
+      };
+
       if (params.text) {
-        await runZellij([...sessionArgs, "action", "paste", "--pane-id", paneId, params.text], { signal });
+        await send([...sessionArgs, "action", "paste", "--pane-id", paneId, params.text]);
       } else if (params.raw) {
         const bytes = Array.from(
           params.raw.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))),
         ).map((c) => String(c.charCodeAt(0)));
-        await runZellij([...sessionArgs, "action", "write", "--pane-id", paneId, ...bytes], { signal });
+        await send([...sessionArgs, "action", "write", "--pane-id", paneId, ...bytes]);
       }
       for (const key of keys) {
-        await runZellij([...sessionArgs, "action", "send-keys", "--pane-id", paneId, key], { signal });
+        await send([...sessionArgs, "action", "send-keys", "--pane-id", paneId, key]);
       }
       const summary = params.text
         ? ` "${params.text.replace(/\n/g, "\\n")}"`
@@ -1036,11 +1085,16 @@ export default function zellijExtension(pi: ExtensionAPI) {
       if (params.resource === "tabs") {
         const { stdout, code } = await runZellij([...sessionArgs, "action", "list-tabs", "--json"], { signal });
         if (code !== 0) throw new Error(`list-tabs failed: ${stdout}`);
-        const tabs = JSON.parse(stdout) as Array<Record<string, unknown>>;
+        let tabs: Array<Record<string, unknown>> = [];
+        try {
+          tabs = JSON.parse(stdout) as Array<Record<string, unknown>>;
+        } catch {
+          throw new Error(`list-tabs returned no JSON (${stdout.slice(0, 80) || "empty stdout"})`);
+        }
         const text = tabs
           .map((t) => `tab ${t.tab_id} "${t.name}" active=${t.active} panes=${t.selectable_tiled_panes_count ?? "?"}`)
           .join("\n");
-        return { content: [{ type: "text", text: text || "(no tabs)" }], details: {} };
+        return { content: [{ type: "text", text: text || "(no tabs)" }], details: { tabs } };
       }
       const panes = await listPanes(sessionArgs);
       const text = panes
@@ -1096,7 +1150,7 @@ export default function zellijExtension(pi: ExtensionAPI) {
         return;
       }
       const a = parseZpArgs(args);
-      let dir = a.cwd ?? ctx.cwd;
+      let dir = a.cwd ? (path.isAbsolute(a.cwd) ? a.cwd : path.resolve(ctx.cwd, a.cwd)) : ctx.cwd;
       if (a.workspaceSet) {
         const ws = await resolveWorkspace(a.workspace, ctx, pi);
         if (!ws) return; // user cancelled
@@ -1127,7 +1181,8 @@ async function dumpPane(
 ): Promise<{ text: string; truncated: boolean }> {
   const args = [...sessionArgs, "action", "dump-screen", "--pane-id", paneId];
   if (full) args.push("--full");
-  const { stdout, code } = await runZellij(args, { timeoutMs: 30_000, signal });
-  if (code !== 0) throw new Error(`dump-screen failed: ${stdout}`);
+  const { stdout, code, killed } = await runZellij(args, { timeoutMs: 30_000, signal });
+  if (code !== 0 && !killed) throw new Error(`dump-screen failed: ${stdout}`);
+  // killed (abort/timeout) — no evidence available, caller decides what that means
   return capOutput(stdout.replace(/\n+$/, ""), maxLines, keepTail);
 }

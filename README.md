@@ -1,4 +1,4 @@
-# zellij-skill
+# pi-zellij
 
 Reliable zellij control for pi: a skill (reference + helper scripts) and a pi extension (custom tools).
 
@@ -8,7 +8,7 @@ Reliable zellij control for pi: a skill (reference + helper scripts) and a pi ex
 SKILL.md                  # skill entry: session targeting, blocking, decision table
 references/cli-actions.md # full CLI reference, loaded on demand
 scripts/wait-for-pattern.sh  # subscribe-based "wait for output" helper
-extension/                # pi extension — 6 tools (see below)
+extension/                # pi extension — 7 tools (see below)
 extension/test/harness.ts # tool tests against a live zellij session
 sync.sh                   # copy skill → ~/.agents/skills/zellij, re-register extension
 ```
