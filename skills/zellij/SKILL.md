@@ -19,6 +19,8 @@ Check sessions: `zellij list-sessions`. Create a headless one: `zellij attach --
 
 ## Core workflow
 
+Prefer the `bash` tool for short-lived commands unless the user explicitly asks for zellij. Use zellij when a command may be interactive or long-running, or when its output is useful to or should remain visible to the user.
+
 ## Run a command and wait — blocking (preferred in agent loops)
 
 Don't poll exit status or guess how long a command takes — a blocking flag makes the `new-pane` call itself return only when the command finishes:
