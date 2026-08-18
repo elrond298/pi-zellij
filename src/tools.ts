@@ -13,12 +13,12 @@ export function registerTools(pi: ExtensionAPI) {
     name: "zellij_run",
     label: "Zellij: Run Command",
     description:
-      "Run a shell command in a new zellij pane (or tab, with target=tab) and wait for it to finish. Returns the pane id, real exit code, and final output. Use for long-running commands, builds, tests, servers — anything where the duration is unknown. Never combine with sleep; the tool waits internally. " +
+      "Run a command in a new zellij pane (or tab, with target=tab) and wait for it to finish. Use only for interactive, long-running, or user-visible commands; use bash for short-lived noninteractive commands. Returns the pane id, real exit code, and final output. Never combine with sleep; the tool waits internally. " +
       "The command runs via sh -c, so pipes, globs, and $VARS work. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped; trailing whitespace stripped, blank-line runs and consecutive duplicate lines collapsed.",
 
-    promptSnippet: "Run a command in a zellij pane or tab and wait for it (returns exit code + output)",
+    promptSnippet: "Run an interactive, long-running, or user-visible command in a zellij pane or tab",
     promptGuidelines: [
-      "Use zellij_run for any command that should run in a terminal pane with visible output — do not emulate long-running processes with bash sleep loops.",
+      "Use zellij_run only for interactive, long-running, or user-visible terminal work. Use bash for short-lived noninteractive commands.",
       "For interactive apps (TUIs, REPLs, editors), spawn with zellij_run wait=none (target=tab puts it in its own tab) and drive it with zellij_send / zellij_wait / zellij_close.",
       "Never fall back to raw `zellij action new-pane` or `zellij run` + manual waiting: zellij_run waits internally and returns the real exit code and output.",
     ],
