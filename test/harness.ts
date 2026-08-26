@@ -54,6 +54,22 @@ async function callExpectError(name: string, params: Record<string, unknown>): P
   check("run: pane id", String(r.details.pane_id).startsWith("terminal_"), String(r.details.pane_id));
 }
 
+// --- zellij_run: close_on_exit preserves waited results and cleans up --------
+{
+  const r = await call("zellij_run", { command: "echo CLOSE_WAITED; exit 4", close_on_exit: true, session: SESSION, timeout: 30 });
+  const panes = await call("zellij_list", { session: SESSION });
+  const gone = !(panes.details.panes as Array<{ id: string }>).some((p) => p.id === r.details.pane_id);
+  check("run: close_on_exit keeps result", r.details.exit_status === 4 && r.content.includes("CLOSE_WAITED"), JSON.stringify(r.details));
+  check("run: close_on_exit removes waited pane", r.details.pane_closed === true && gone, JSON.stringify(r.details));
+}
+
+// --- zellij_run: close_on_exit is native for detached commands ---------------
+{
+  const r = await call("zellij_run", { command: "sleep 0.5", wait: "none", close_on_exit: true, session: SESSION });
+  const w = await call("zellij_wait", { pane_id: r.details.pane_id, for: "exit", timeout: 5, session: SESSION });
+  check("run: close_on_exit removes detached pane", w.details.exited === true && w.details.removed_from_layout === true, JSON.stringify(w.details));
+}
+
 // --- zellij_run: wait=exit-success with failing command ----------------------
 {
   const r = await call("zellij_run", { command: "exit 1", wait: "exit-success", session: SESSION, timeout: 30 });

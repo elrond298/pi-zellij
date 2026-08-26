@@ -14,7 +14,7 @@ export function registerTools(pi: ExtensionAPI) {
     label: "Zellij: Run Command",
     description:
       "Run a command in a new zellij pane (or tab, with target=tab) and wait for it to finish. Use only for interactive, long-running, or user-visible commands; use bash for short-lived noninteractive commands. Returns the pane id, real exit code, and final output. Never combine with sleep; the tool waits internally. " +
-      "The command runs via sh -c, so pipes, globs, and $VARS work. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped; trailing whitespace stripped, blank-line runs and consecutive duplicate lines collapsed.",
+      "The command runs via sh -c, so pipes, globs, and $VARS work. With close_on_exit, waited panes close after result capture; detached panes use Zellij's native cleanup. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped; trailing whitespace stripped, blank-line runs and consecutive duplicate lines collapsed.",
 
     promptSnippet: "Run an interactive, long-running, or user-visible command in a zellij pane or tab",
     promptGuidelines: [
@@ -33,6 +33,9 @@ export function registerTools(pi: ExtensionAPI) {
       ),
       capture: Type.Optional(
         Type.Boolean({ description: "Capture final pane output (default true; ignored when wait=none)", default: true }),
+      ),
+      close_on_exit: Type.Optional(
+        Type.Boolean({ description: "Close the pane after the command exits. Waited commands are closed after output and status capture; timed-out commands stay open.", default: false }),
       ),
       name: Type.Optional(Type.String({ description: "Optional pane (or tab, when target=tab) name" })),
       target: Type.Optional(
@@ -66,6 +69,7 @@ export function registerTools(pi: ExtensionAPI) {
       const createArgs = [...sessionArgs, "action", inTab ? "new-tab" : "new-pane"];
       if (tabName) createArgs.push("--name", tabName);
       if (params.cwd) createArgs.push("--cwd", params.cwd);
+      if (params.close_on_exit && params.wait === "none") createArgs.push("--close-on-exit");
       createArgs.push("--", "sh", "-c", command);
 
       let created = await runZellij(createArgs, { timeoutMs: 30_000, signal });
@@ -119,7 +123,7 @@ export function registerTools(pi: ExtensionAPI) {
       if (params.wait === "none") {
         return {
           content: [{ type: "text", text: `Started in ${where}.` }],
-          details: { pane_id: paneId, tab_id: tabId, waited: false },
+          details: { pane_id: paneId, tab_id: tabId, waited: false, close_on_exit: params.close_on_exit === true },
         };
       }
 
@@ -130,6 +134,14 @@ export function registerTools(pi: ExtensionAPI) {
         ? await dumpPane(paneId, true, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal)
         : null;
 
+      let paneClosed = false;
+      if (params.close_on_exit && !timedOut) {
+        const closed = await runZellij([...sessionArgs, "action", "close-pane", "--pane-id", paneId], { signal });
+        if (closed.killed || closed.code !== 0) {
+          throw new Error(`close-pane failed: ${closed.stderr.trim() || closed.stdout.trim()}`);
+        }
+        paneClosed = true;
+      }
       let condition = "exit";
       if (params.wait === "exit-success" && pane?.exit_status === 0) condition = "exit-success (met)";
       if (params.wait === "exit-failure" && pane?.exit_status !== 0 && pane?.exited) condition = "exit-failure (met)";
@@ -142,6 +154,7 @@ export function registerTools(pi: ExtensionAPI) {
         ? `${inTab ? "Tab" : "Pane"} ${inTab ? tabId : paneId} still running after ${params.timeout ?? 600}s (timeout). Pane keeps running. Output so far:\n${output?.text ?? "(capture disabled)"}` +
           capNote(output ?? { truncated: false, compressed: 0 })
         : `Command finished: exit status ${pane?.exit_status} (${condition}), waited ${waited}s in ${where}.` +
+          (paneClosed ? " Pane closed." : "") +
           (output?.text ? `\n\n--- output (${paneId}) ---\n${output.text}` + capNote(output) : "");
 
 
@@ -153,6 +166,7 @@ export function registerTools(pi: ExtensionAPI) {
           waited_seconds: waited,
           timed_out: timedOut,
           exited: pane?.exited ?? false,
+          pane_closed: paneClosed,
           exit_status: pane?.exit_status ?? null,
           output_captured: output?.text ?? null,
         },
