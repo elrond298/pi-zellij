@@ -131,10 +131,12 @@ export async function waitForIdle(
   signal?: AbortSignal,
 ): Promise<WaitOutcome> {
   return new Promise((resolve, reject) => {
-    const child = spawn("zellij", [...sessionArgs, "subscribe", "--pane-id", paneId], {
+    const child = spawn("zellij", [...sessionArgs, "subscribe", "--pane-id", paneId, "--format", "json"], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let done = false;
+    let buf = "";
+    let snapshot: string | undefined;
     let lastChange = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let watchdog: ReturnType<typeof setInterval> | undefined;
@@ -178,7 +180,18 @@ export async function waitForIdle(
     }, 200);
 
     child.stdout.on("data", (d) => {
-      if (!done && d.length) lastChange = Date.now();
+      buf += d;
+      for (let newline; (newline = buf.indexOf("\n")) !== -1; ) {
+        const line = buf.slice(0, newline);
+        buf = buf.slice(newline + 1);
+        try {
+          const update = JSON.parse(line);
+          if (update.event !== "pane_update" || !Array.isArray(update.viewport)) continue;
+          const next = JSON.stringify([update.viewport, update.scrollback]);
+          if (snapshot !== undefined && next !== snapshot) lastChange = Date.now();
+          snapshot = next;
+        } catch {}
+      }
     });
     child.on("error", (err) => {
       signal?.removeEventListener("abort", onAbort);

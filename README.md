@@ -59,6 +59,7 @@ The bundled `zellij` skill is a CLI reference for controlling zellij from a shel
 ```bash
 npm install                                             # once, for a fresh clone
 node --experimental-strip-types test/harness.ts        # tools, live session (fresh per run)
+node --experimental-strip-types test/wait-test.ts       # idle deduplication (no live session needed)
 node --experimental-strip-types test/command-test.ts   # /zellij-pi — run INSIDE a zellij pane
 ```
 
