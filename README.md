@@ -29,7 +29,7 @@ Idempotent — re-run after pulling updates. The skill is discovered from this r
 
 | Tool | Purpose | Reliability notes |
 |---|---|---|
-| `zellij_run` | Run a shell command in a new pane **or tab** (`target`), wait for it | Real exit code (sh -c), optional `close_on_exit` cleanup, timeout returns partial results; `wait=none` returns the pane id instantly for interactive apps |
+| `zellij_run` | Run a shell command visibly in a new pane **or tab** (`target`) | Waited runs stream output through Pi's bash result path (standard truncation, temp-file capture, non-zero/timeout/cancel errors); `wait=none` returns immediately for interactive apps; `session` explicitly targets or creates a session |
 | `zellij_dump` | Read pane output (viewport / full scrollback) | ANSI stripped, tail kept when line-capped, blank-run and duplicate lines collapsed |
 | `zellij_send` | Paste text, named keys, or raw bytes into a pane | Bracketed paste multi-line safe; `raw` accepts `\xNN` escape sequences |
 | `zellij_wait` | Wait for a pattern in pane output, or `for: "exit"` for the process to exit | Subscribe-based, scrollback pre-check, kills subscriber, timeout; failed waits are self-diagnosing — pane exit returns early with the exit state, timeouts carry last output as evidence |
@@ -38,6 +38,8 @@ Idempotent — re-run after pulling updates. The skill is discovered from this r
 | `zellij_close` | Close a pane (last pane of a tab closes the tab) | — |
 
 All tools auto-resolve the session: explicit `session` (auto-created headless if missing) → current session when running inside zellij → default `pi` session.
+
+Pi keeps its built-in `bash` tool. The model chooses `bash` for short, noninteractive commands and `zellij_run` for long-running, interactive, or user-visible work; the extension does not intercept or reroute bash automatically.
 
 ### Slash command
 
@@ -60,6 +62,7 @@ The bundled `zellij` skill is a CLI reference for controlling zellij from a shel
 npm install                                             # once, for a fresh clone
 node --experimental-strip-types test/harness.ts        # tools, live session (fresh per run)
 node --experimental-strip-types test/wait-test.ts       # idle deduplication (no live session needed)
+node --experimental-strip-types test/run-test.ts        # streamed run lifecycle + explicit sessions
 node --experimental-strip-types test/command-test.ts   # /zellij-pi — run INSIDE a zellij pane
 ```
 

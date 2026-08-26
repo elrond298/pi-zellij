@@ -48,18 +48,18 @@ async function callExpectError(name: string, params: Record<string, unknown>): P
 
 // --- zellij_run: basic run + exit code + output ------------------------------
 {
-  const r = await call("zellij_run", { command: "echo hello-from-tool; exit 3", session: SESSION, timeout: 30 });
-  check("run: exit code captured", r.details.exit_status === 3, `status=${r.details.exit_status}`);
+  const r = await call("zellij_run", { command: "echo hello-from-tool", session: SESSION, timeout: 30 });
+  check("run: exit code captured", r.details.exit_status === 0, `status=${r.details.exit_status}`);
   check("run: output captured", r.content.includes("hello-from-tool"), r.content.slice(0, 100));
   check("run: pane id", String(r.details.pane_id).startsWith("terminal_"), String(r.details.pane_id));
 }
 
 // --- zellij_run: close_on_exit preserves waited results and cleans up --------
 {
-  const r = await call("zellij_run", { command: "echo CLOSE_WAITED; exit 4", close_on_exit: true, session: SESSION, timeout: 30 });
+  const r = await call("zellij_run", { command: "echo CLOSE_WAITED", close_on_exit: true, session: SESSION, timeout: 30 });
   const panes = await call("zellij_list", { session: SESSION });
   const gone = !(panes.details.panes as Array<{ id: string }>).some((p) => p.id === r.details.pane_id);
-  check("run: close_on_exit keeps result", r.details.exit_status === 4 && r.content.includes("CLOSE_WAITED"), JSON.stringify(r.details));
+  check("run: close_on_exit keeps result", r.details.exit_status === 0 && r.content.includes("CLOSE_WAITED"), JSON.stringify(r.details));
   check("run: close_on_exit removes waited pane", r.details.pane_closed === true && gone, JSON.stringify(r.details));
 }
 
@@ -70,10 +70,10 @@ async function callExpectError(name: string, params: Record<string, unknown>): P
   check("run: close_on_exit removes detached pane", w.details.exited === true && w.details.removed_from_layout === true, JSON.stringify(w.details));
 }
 
-// --- zellij_run: wait=exit-success with failing command ----------------------
+// --- zellij_run: non-zero exits use Pi bash error semantics ------------------
 {
-  const r = await call("zellij_run", { command: "exit 1", wait: "exit-success", session: SESSION, timeout: 30 });
-  check("run: exit-success NOT met", r.content.includes("NOT met") && r.details.exit_status === 1, r.content.slice(0, 100));
+  const failed = await callExpectError("zellij_run", { command: "exit 1", session: SESSION, timeout: 30 });
+  check("run: non-zero exit is an error", failed);
 }
 
 // --- zellij_run: wait=none returns immediately --------------------------------
@@ -84,10 +84,10 @@ async function callExpectError(name: string, params: Record<string, unknown>): P
   check("run: wait=none immediate", fast && r.details.waited === false, `${Date.now() - start}ms`);
 }
 
-// --- zellij_run: timeout returns partial results ------------------------------
+// --- zellij_run: timeout is a Pi bash-style error ---------------------------
 {
-  const r = await call("zellij_run", { command: "sleep 30", timeout: 3, session: SESSION });
-  check("run: timeout returns partial", r.details.timed_out === true, JSON.stringify(r.details));
+  const timedOut = await callExpectError("zellij_run", { command: "sleep 30", timeout: 1, session: SESSION });
+  check("run: timeout is an error", timedOut);
 }
 
 // --- zellij_send + zellij_wait (live pattern) ---------------------------------
@@ -171,8 +171,8 @@ async function callExpectError(name: string, params: Record<string, unknown>): P
 
 // --- zellij_run: target=tab ------------------------------------------------------
 {
-  const r = await call("zellij_run", { command: "echo TABRUN_OK; exit 5", target: "tab", name: "harness-tab", session: SESSION, timeout: 30 });
-  check("run in tab: exit code", r.details.exit_status === 5 && typeof r.details.tab_id === "number", JSON.stringify(r.details));
+  const r = await call("zellij_run", { command: "echo TABRUN_OK", target: "tab", name: "harness-tab", session: SESSION, timeout: 30 });
+  check("run in tab: exit code", r.details.exit_status === 0 && typeof r.details.tab_id === "number", JSON.stringify(r.details));
   check("run in tab: output", r.content.includes("TABRUN_OK"), r.content.slice(0, 120));
   const panes = await call("zellij_list", { session: SESSION });
   const p = (panes.details.panes as Array<{ id: string; tab_name: string | null }>).find((x) => x.id === r.details.pane_id);
@@ -267,13 +267,17 @@ async function callExpectError(name: string, params: Record<string, unknown>): P
   await call("zellij_close", { pane_id: pid3b, session: SESSION });
 
   // run timeout: carries output so far
-  const r4 = await call("zellij_run", { command: "echo RUN_EVIDENCE_55; sleep 20", timeout: 3, session: SESSION });
+  let runTimeout = "";
+  try {
+    await call("zellij_run", { command: "echo RUN_EVIDENCE_55; sleep 20", timeout: 1, session: SESSION });
+  } catch (error) {
+    runTimeout = String(error);
+  }
   check(
     "run timeout: carries output so far",
-    r4.details.timed_out === true && String(r4.details.output_captured ?? "").includes("RUN_EVIDENCE_55"),
-    JSON.stringify(r4.details).slice(0, 300),
+    runTimeout.includes("RUN_EVIDENCE_55") && runTimeout.includes("timed out"),
+    runTimeout.slice(0, 300),
   );
-  await call("zellij_close", { pane_id: r4.details.pane_id as string, session: SESSION });
 }
 
 

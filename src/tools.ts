@@ -3,8 +3,9 @@
  * (session description, prompt guidelines) and built on the shared helpers.
  */
 import { Type } from "typebox";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { runZellij, listPanes, listSessions, resolveSession, normalizePaneId, findPane } from "./cli.ts";
+import { createBashTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { runZellij, listPanes, listSessions, resolveSession, normalizePaneId, findPane, type PaneInfo } from "./cli.ts";
+import { createCommandPane, createZellijBashOperations, type RunLocation } from "./run.ts";
 import { waitForPattern, waitForIdle } from "./wait.ts";
 import { dumpPane, capNote, showLine } from "./output.ts";
 
@@ -13,164 +14,106 @@ export function registerTools(pi: ExtensionAPI) {
     name: "zellij_run",
     label: "Zellij: Run Command",
     description:
-      "Run a command in a new zellij pane (or tab, with target=tab) and wait for it to finish. Use only for interactive, long-running, or user-visible commands; use bash for short-lived noninteractive commands. Returns the pane id, real exit code, and final output. Never combine with sleep; the tool waits internally. " +
-      "The command runs via sh -c, so pipes, globs, and $VARS work. With close_on_exit, waited panes close after result capture; detached panes use Zellij's native cleanup. On timeout returns partial results (pane keeps running) so the caller can zellij_wait or zellij_dump later. Captured output keeps the tail when capped; trailing whitespace stripped, blank-line runs and consecutive duplicate lines collapsed.",
+      "Run a command visibly in a new Zellij pane or tab. Use for interactive, long-running, or user-visible commands; use bash for short-lived noninteractive commands. " +
+      "Waited commands stream output into Pi and return bash-compatible output and errors. Detached commands return the pane id immediately. An explicit session is auto-created when absent.",
 
-    promptSnippet: "Run an interactive, long-running, or user-visible command in a zellij pane or tab",
+    promptSnippet: "Run an interactive, long-running, or user-visible command in a Zellij pane or tab",
     promptGuidelines: [
       "Use zellij_run only for interactive, long-running, or user-visible terminal work. Use bash for short-lived noninteractive commands.",
-      "For interactive apps (TUIs, REPLs, editors), spawn with zellij_run wait=none (target=tab puts it in its own tab) and drive it with zellij_send / zellij_wait / zellij_close.",
-      "Never fall back to raw `zellij action new-pane` or `zellij run` + manual waiting: zellij_run waits internally and returns the real exit code and output.",
+      "For interactive apps (TUIs, REPLs, editors), spawn with zellij_run wait=none and drive it with zellij_send / zellij_wait / zellij_close.",
+      "For waited zellij_run commands, rely on its streamed result and exit status instead of calling zellij_dump afterward.",
     ],
     parameters: Type.Object({
-      command: Type.String({ description: "Command to run (shell syntax allowed; wrapped in sh -c)" }),
+      command: Type.String({ description: "Command to run (shell syntax allowed)" }),
       wait: Type.Optional(
         Type.String({
-          description: "exit (default): wait until the command exits, any status. exit-success / exit-failure: wait until that outcome, otherwise return immediately with the actual status. none: create the pane and return at once.",
-          enum: ["exit", "exit-success", "exit-failure", "none"],
+          description: "exit (default): stream output and wait for completion. none: create the pane and return immediately.",
+          enum: ["exit", "none"],
           default: "exit",
         }),
       ),
-      capture: Type.Optional(
-        Type.Boolean({ description: "Capture final pane output (default true; ignored when wait=none)", default: true }),
-      ),
       close_on_exit: Type.Optional(
-        Type.Boolean({ description: "Close the pane after the command exits. Waited commands are closed after output and status capture; timed-out commands stay open.", default: false }),
+        Type.Boolean({ description: "Close a completed pane after result capture; detached commands use Zellij's native close-on-exit.", default: false }),
       ),
       name: Type.Optional(Type.String({ description: "Optional pane (or tab, when target=tab) name" })),
       target: Type.Optional(
         Type.String({
-          description: "Where to run the command: a new pane (default) or a new tab. For a tab, a tab is created and the command runs in its first pane.",
+          description: "Where to run the command: a new pane (default) or a new tab.",
           enum: ["pane", "tab"],
           default: "pane",
         }),
       ),
-      cwd: Type.Optional(Type.String({ description: "Working directory for the new pane or tab" })),
-      session: Type.Optional(Type.String({ description: "Zellij session name. Default: current session when running inside zellij, else a session named 'pi' (auto-created)." })),
+      cwd: Type.Optional(Type.String({ description: "Working directory; defaults to Pi's current working directory" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name. Explicit names are auto-created; otherwise use the current session or default 'pi'." })),
       timeout: Type.Optional(
-        Type.Number({ description: "Max seconds to wait (default 600). On expiry returns partial results.", default: 600 }),
-      ),
-      max_lines: Type.Optional(Type.Number({ description: "Cap on returned output lines (default 500)", default: 500 })),
-      tail: Type.Optional(
-        Type.Boolean({ description: "When output exceeds max_lines, return the last lines instead of the first (default true)", default: true }),
+        Type.Number({ description: "Maximum seconds to wait (default 600). Timeout terminates the pane and reports partial output.", default: 600 }),
       ),
     }),
-    async execute(_toolCallId, params, signal) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const sessionArgs = await resolveSession(params.session);
-      const inTab = params.target === "tab";
-      const timeoutMs = (params.timeout ?? 600) * 1000;
-      // Verified on zellij 0.44: new-tab with an instant command races pane registration —
-      // the command runs, but zellij then keeps a zombie interactive shell and the exit is
-      // never recorded (a sleep of even 0.05s avoids it). The prelude keeps the command
-      // alive across that window. new-pane does not race, so the prelude is tabs-only.
-      const command = inTab ? `sleep 0.2; ${params.command}` : params.command;
-      const tabName = inTab && !params.name ? `pi-run-${Date.now()}` : params.name;
-
-      const createArgs = [...sessionArgs, "action", inTab ? "new-tab" : "new-pane"];
-      if (tabName) createArgs.push("--name", tabName);
-      if (params.cwd) createArgs.push("--cwd", params.cwd);
-      if (params.close_on_exit && params.wait === "none") createArgs.push("--close-on-exit");
-      createArgs.push("--", "sh", "-c", command);
-
-      let created = await runZellij(createArgs, { timeoutMs: 30_000, signal });
-      // The server intermittently answers with empty stdout (exit 0), typically right
-      // after a killed subscriber — retry creation once before giving up.
-      if (!created.stdout.trim() && !created.killed) {
-        await new Promise((r) => setTimeout(r, 300));
-        created = await runZellij(createArgs, { timeoutMs: 30_000, signal });
-      }
-      if (created.killed) {
-        throw new Error(`new-${inTab ? "tab" : "pane"} timed out after 30s`);
-      }
-      const createdId = created.stdout.trim();
-      let paneId: string;
-      let tabId: number | null = null;
-      let pane: PaneInfo | undefined;
-      let waited = 0;
-
-      if (!inTab) {
-        if (!createdId.startsWith("terminal_")) {
-          throw new Error(`new-pane failed: ${created.stdout} ${created.stderr}`);
-        }
-        paneId = createdId;
-      } else {
-        // new-tab prints a bare tab id; resolve it to the command pane's id
-        // (require digits — Number("") would silently become 0 on a stale empty reply)
-        if (!/^\d+$/.test(createdId)) {
-          throw new Error(`new-tab failed: ${created.stdout} ${created.stderr}`);
-        }
-        tabId = Number(createdId);
-        const panes = await listPanes(sessionArgs);
-        const tabPane = panes.find((p) => p.tab_id === tabId);
-        if (!tabPane) throw new Error(`new-tab created tab ${tabId} but no pane was found in it`);
-        paneId = `terminal_${tabPane.id}`;
-      }
-
-      if (params.wait !== "none") {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-          const panes = await listPanes(sessionArgs);
-          pane = findPane(panes, paneId);
-          if (pane.exited) break;
-          if (signal?.aborted) break;
-          await new Promise((r) => setTimeout(r, 1000));
-          waited += 1;
-        }
-      }
-
-      const where = inTab ? `tab ${tabId}` : `pane ${paneId}`;
+      const cwd = params.cwd ?? ctx?.cwd ?? process.cwd();
+      const targetTab = params.target === "tab";
 
       if (params.wait === "none") {
+        const created = await createCommandPane(["sh", "-c", params.command], {
+          sessionArgs,
+          targetTab,
+          name: params.name,
+          cwd,
+          closeOnExit: params.close_on_exit === true,
+          signal,
+        });
+        const where = targetTab ? `tab ${created.tabId}` : `pane ${created.paneId}`;
         return {
           content: [{ type: "text", text: `Started in ${where}.` }],
-          details: { pane_id: paneId, tab_id: tabId, waited: false, close_on_exit: params.close_on_exit === true },
+          details: {
+            pane_id: created.paneId,
+            tab_id: created.tabId,
+            session: params.session ?? null,
+            waited: false,
+            close_on_exit: params.close_on_exit === true,
+          },
         };
       }
 
+      const location: RunLocation = { tabId: null, exitStatus: null, paneClosed: false };
+      const bash = createBashTool(cwd, {
+        operations: createZellijBashOperations(
+          {
+            sessionArgs,
+            targetTab,
+            name: params.name,
+            closeOnExit: params.close_on_exit === true,
+          },
+          location,
+        ),
+      });
 
-      const timedOut = !pane?.exited;
-      // Evidence on failure: on timeout, still capture output so far (tail kept).
-      const output = params.capture !== false
-        ? await dumpPane(paneId, true, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal)
-        : null;
-
-      let paneClosed = false;
-      if (params.close_on_exit && !timedOut) {
-        const closed = await runZellij([...sessionArgs, "action", "close-pane", "--pane-id", paneId], { signal });
-        if (closed.killed || closed.code !== 0) {
-          throw new Error(`close-pane failed: ${closed.stderr.trim() || closed.stdout.trim()}`);
-        }
-        paneClosed = true;
+      try {
+        const result = await bash.execute(
+          toolCallId,
+          { command: params.command, timeout: params.timeout ?? 600 },
+          signal,
+          onUpdate,
+        );
+        return {
+          ...result,
+          details: {
+            ...result.details,
+            pane_id: location.paneId,
+            tab_id: location.tabId,
+            session: params.session ?? null,
+            waited: true,
+            exited: true,
+            exit_status: location.exitStatus,
+            pane_closed: location.paneClosed,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const where = location.paneId ? `\n\nZellij pane: ${location.paneId}${params.session ? ` (session ${params.session})` : ""}` : "";
+        throw new Error(message + where);
       }
-      let condition = "exit";
-      if (params.wait === "exit-success" && pane?.exit_status === 0) condition = "exit-success (met)";
-      if (params.wait === "exit-failure" && pane?.exit_status !== 0 && pane?.exited) condition = "exit-failure (met)";
-      if (pane?.exited && params.wait === "exit-success" && pane.exit_status !== 0)
-        condition = `exit-success NOT met — command exited ${pane.exit_status}`;
-      if (pane?.exited && params.wait === "exit-failure" && pane.exit_status === 0)
-        condition = "exit-failure NOT met — command exited 0";
-
-      const text = timedOut
-        ? `${inTab ? "Tab" : "Pane"} ${inTab ? tabId : paneId} still running after ${params.timeout ?? 600}s (timeout). Pane keeps running. Output so far:\n${output?.text ?? "(capture disabled)"}` +
-          capNote(output ?? { truncated: false, compressed: 0 })
-        : `Command finished: exit status ${pane?.exit_status} (${condition}), waited ${waited}s in ${where}.` +
-          (paneClosed ? " Pane closed." : "") +
-          (output?.text ? `\n\n--- output (${paneId}) ---\n${output.text}` + capNote(output) : "");
-
-
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          pane_id: paneId,
-          tab_id: tabId,
-          waited_seconds: waited,
-          timed_out: timedOut,
-          exited: pane?.exited ?? false,
-          pane_closed: paneClosed,
-          exit_status: pane?.exit_status ?? null,
-          output_captured: output?.text ?? null,
-        },
-      };
     },
   });
 

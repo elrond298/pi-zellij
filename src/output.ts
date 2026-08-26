@@ -51,7 +51,7 @@ export async function dumpPane(
   keepTail: boolean,
   sessionArgs: string[],
   signal?: AbortSignal,
-): Promise<{ text: string; truncated: boolean }> {
+): Promise<{ text: string; truncated: boolean; compressed: number }> {
   const args = [...sessionArgs, "action", "dump-screen", "--pane-id", paneId];
   if (full) args.push("--full");
   const { stdout, code, killed } = await runZellij(args, { timeoutMs: 30_000, signal });
