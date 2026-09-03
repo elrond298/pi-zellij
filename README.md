@@ -43,6 +43,8 @@ Pi keeps its built-in `bash` tool. The model chooses `bash` for short, nonintera
 
 ### Slash command
 
+`/zellij-ps` lists panes created by `zellij_run` in the current Pi session. Select one to reveal and focus it.
+
 `/zellij-pi` (inside a zellij session) opens a new pi in a new pane, or tab with `--tab`:
 - `--cwd <dir>` or a positional `<dir>` — open pi there; relative paths resolve against the current cwd
 - `--workspace [project/]name` — a workspace under `~/.worktrees/<project>/<name>` (the pi-worktree convention); without a name, pick interactively from existing workspaces or create one. Workspace creation mirrors pi-worktree: `git worktree add -b <name>` for git repos, `jj workspace add` for jj repos, `mkdir` + init for bare directories. A bare name uses the repo at the current cwd as the project; pass `project/name` explicitly for another project
@@ -63,7 +65,7 @@ npm install                                             # once, for a fresh clon
 node --experimental-strip-types test/harness.ts        # tools, live session (fresh per run)
 node --experimental-strip-types test/wait-test.ts       # idle deduplication (no live session needed)
 node --experimental-strip-types test/run-test.ts        # streamed run lifecycle + explicit sessions
-node --experimental-strip-types test/command-test.ts   # /zellij-pi — run INSIDE a zellij pane
+node --experimental-strip-types test/command-test.ts    # slash commands — run INSIDE a zellij pane
 ```
 
 The repo is jj-managed (colocated git). Commit, then re-install:

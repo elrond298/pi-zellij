@@ -25,8 +25,9 @@ const fakePi: any = {
 
 ext(fakePi);
 const cmd = commands.get("zellij-pi");
-if (!cmd) {
-  console.log("FAIL  command not registered");
+const psCmd = commands.get("zellij-ps");
+if (!cmd || !psCmd) {
+  console.log("FAIL  commands not registered");
   process.exit(1);
 }
 if (!process.env.ZELLIJ) {
@@ -46,7 +47,8 @@ function fakeCtx(over: Record<string, unknown> = {}) {
     cwd: `${HOME}/opt/${PROJ}`, // inside the pi-zellij repo
     ui: {
       notify: (msg: string, level: string) => notifies.push({ level, msg }),
-      select: async (_t: string, opts: string[]) => over.select ?? opts[0],
+      select: async (title: string, opts: string[]) =>
+        typeof over.select === "function" ? (over.select as Function)(title, opts) : (over.select ?? opts[0]),
       input: async () => over.input ?? WS,
       confirm: async () => over.confirm ?? true,
     },
@@ -73,6 +75,42 @@ function jj(args: string[]) {
   } catch (e: any) {
     return `ERR ${e.stderr ?? ""}`;
   }
+}
+
+// --- /zellij-ps lists tracked panes and focuses the selected one -------------------
+const invokingPane = String(process.env.ZELLIJ_PANE_ID).startsWith("terminal_")
+  ? String(process.env.ZELLIJ_PANE_ID)
+  : `terminal_${process.env.ZELLIJ_PANE_ID}`;
+const psPane = execFs(
+  "zellij",
+  ["action", "new-pane", "--floating", "--no-focus", "--name", "ps-command-test", "--", "sh", "-c", "sleep 20"],
+  { encoding: "utf8" },
+).trim();
+let psChoices: string[] = [];
+try {
+  await psCmd.handler(
+    "",
+    fakeCtx({
+      sessionManager: {
+        getBranch: () => [
+          {
+            type: "message",
+            message: { role: "toolResult", toolName: "zellij_run", details: { pane_id: psPane, session: null } },
+          },
+        ],
+      },
+      select: (_title: string, choices: string[]) => {
+        psChoices = choices;
+        return choices.find((choice) => choice.startsWith(psPane));
+      },
+    }),
+  );
+  check("zellij-ps: tracked pane listed", psChoices.some((choice) => choice.includes(`${psPane}  running  ps-command-test`)), JSON.stringify(psChoices));
+  const clients = execFs("zellij", ["action", "list-clients"], { encoding: "utf8" });
+  check("zellij-ps: selected pane focused", clients.includes(psPane), clients);
+} finally {
+  execFs("zellij", ["action", "focus-pane-id", invokingPane], { stdio: "ignore" });
+  await closePane(psPane);
 }
 
 // --- case 1: --cwd opens a new pane named pi with the given cwd -----------------

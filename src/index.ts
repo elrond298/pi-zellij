@@ -12,9 +12,10 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerTools } from "./tools.ts";
-import { registerZellijPi } from "./command.ts";
+import { registerZellijPi, registerZellijPs } from "./command.ts";
 
 export default function zellijExtension(pi: ExtensionAPI) {
   registerTools(pi);
   registerZellijPi(pi);
+  registerZellijPs(pi);
 }
