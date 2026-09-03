@@ -15,7 +15,8 @@ export function registerTools(pi: ExtensionAPI) {
     label: "Zellij: Run Command",
     description:
       "Run a command visibly in a new Zellij pane or tab. Use for interactive, long-running, or user-visible commands; use bash for short-lived noninteractive commands. " +
-      "Waited commands stream output into Pi and return bash-compatible output and errors. Detached commands return the pane id immediately. An explicit session is auto-created when absent.",
+      "Waited commands stream output into Pi and return bash-compatible output and errors. Detached commands return the pane id immediately. " +
+      "By default, a pane opens beside the invoking Pi pane without changing client focus. An explicit session is auto-created when absent.",
 
     promptSnippet: "Run an interactive, long-running, or user-visible command in a Zellij pane or tab",
     promptGuidelines: [

@@ -83,6 +83,26 @@ try {
     JSON.stringify(detached.details),
   );
 
+  if (process.env.ZELLIJ_PANE_ID) {
+    const listCurrent = () =>
+      JSON.parse(execFileSync("zellij", ["action", "list-panes", "--json"], { encoding: "utf8" })) as any[];
+    const beforePlacement = listCurrent();
+    const piPane = beforePlacement.find((pane) => String(pane.id) === process.env.ZELLIJ_PANE_ID);
+    const focusedBefore = beforePlacement.filter((pane) => pane.is_focused).map((pane) => pane.id).sort();
+    let placedPane: string | undefined;
+    try {
+      const placed = await call({ command: "sleep 20", wait: "none", session: undefined });
+      placedPane = placed.details.pane_id;
+      const afterPlacement = listCurrent();
+      const created = afterPlacement.find((pane) => `terminal_${pane.id}` === placedPane);
+      const focusedAfter = afterPlacement.filter((pane) => pane.is_focused).map((pane) => pane.id).sort();
+      check("default pane stays in Pi tab", created?.tab_id === piPane?.tab_id, JSON.stringify({ piPane, created }));
+      check("default pane preserves focus", JSON.stringify(focusedAfter) === JSON.stringify(focusedBefore), JSON.stringify({ focusedBefore, focusedAfter }));
+    } finally {
+      if (placedPane) execFileSync("zellij", ["action", "close-pane", "--pane-id", placedPane], { stdio: "ignore" });
+    }
+  }
+
   const earlyAbort = new AbortController();
   const earlyCancelledRun = run.execute(
     "run-early-cancel-test",

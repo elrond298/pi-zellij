@@ -29,7 +29,7 @@ Idempotent — re-run after pulling updates. The skill is discovered from this r
 
 | Tool | Purpose | Reliability notes |
 |---|---|---|
-| `zellij_run` | Run a shell command visibly in a new pane **or tab** (`target`) | Waited runs stream output through Pi's bash result path (standard truncation, temp-file capture, non-zero/timeout/cancel errors); `wait=none` returns immediately for interactive apps; `session` explicitly targets or creates a session |
+| `zellij_run` | Run a shell command visibly in a new pane **or tab** (`target`) | Default panes open beside the invoking Pi pane without changing client focus; waited runs stream output through Pi's bash result path; `wait=none` returns immediately; `session` explicitly targets or creates a session |
 | `zellij_dump` | Read pane output (viewport / full scrollback) | ANSI stripped, tail kept when line-capped, blank-run and duplicate lines collapsed |
 | `zellij_send` | Paste text, named keys, or raw bytes into a pane | Bracketed paste multi-line safe; `raw` accepts `\xNN` escape sequences |
 | `zellij_wait` | Wait for a pattern in pane output, or `for: "exit"` for the process to exit | Subscribe-based, scrollback pre-check, kills subscriber, timeout; failed waits are self-diagnosing — pane exit returns early with the exit state, timeouts carry last output as evidence |
