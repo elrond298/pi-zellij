@@ -45,7 +45,6 @@ const wsDir = `${HOME}/.worktrees/${PROJ}/${WS}`;
 let failures = 0;
 const notifies: { level: string; msg: string }[] = [];
 function fakeCtx(over: Record<string, unknown> = {}) {
-  let customCalls = 0;
   return {
     cwd: `${HOME}/opt/${PROJ}`, // inside the pi-zellij repo
     ui: {
@@ -54,18 +53,21 @@ function fakeCtx(over: Record<string, unknown> = {}) {
         typeof over.select === "function" ? (over.select as Function)(title, opts) : (over.select ?? opts[0]),
       custom: async (factory: Function) => {
         let result: unknown = null;
+        let doneCalled = false;
         const component = factory(
           { requestRender() {} },
           { fg: (_color: string, text: string) => text, bold: (text: string) => text },
           {},
-          (value: unknown) => { result = value; },
+          (value: unknown) => { result = value; doneCalled = true; },
         );
-        const lines = component.render(120);
-        if (typeof over.onRender === "function") (over.onRender as Function)(lines);
-        if (typeof over.onCustom === "function") (over.onCustom as Function)(customCalls);
-        const key = String(Array.isArray(over.keys) ? over.keys[customCalls] ?? "\x1b" : over.key ?? "\r");
-        customCalls++;
-        component.handleInput(key);
+        if (typeof over.onCustom === "function") (over.onCustom as Function)();
+        const keys = Array.isArray(over.keys) ? over.keys : [over.key ?? "\r"];
+        for (const key of keys) {
+          if (typeof over.onRender === "function") (over.onRender as Function)(component.render(120));
+          component.handleInput(String(key));
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          if (doneCalled) break;
+        }
         return result;
       },
       input: async () => over.input ?? WS,
@@ -127,14 +129,16 @@ try {
   const clients = execFs("zellij", ["action", "list-clients"], { encoding: "utf8" });
   check("zellij-ps: enter focuses pane", clients.includes(runningPane), clients);
 
-  let confirmations = 0;
+  let confirmationRendered = false;
   await psCmd.handler("", psContext([runningPane], {
-    keys: ["x", "\x1b"],
-    confirm: () => { confirmations++; return false; },
+    keys: ["x", "\x1b", "\x1b"],
+    onRender: (lines: string[]) => {
+      if (lines.some((line) => line.includes(`Close running pane ${runningPane}?`))) confirmationRendered = true;
+    },
   }));
-  check("zellij-ps: running close asks confirmation", confirmations === 1 && await paneExists(runningPane));
+  check("zellij-ps: running close asks confirmation", confirmationRendered && await paneExists(runningPane));
 
-  await psCmd.handler("", psContext([runningPane], { key: "x", confirm: true }));
+  await psCmd.handler("", psContext([runningPane], { keys: ["x", "y"] }));
   check("zellij-ps: confirmed running pane closed", !await paneExists(runningPane));
   runningPane = "";
 
@@ -149,16 +153,25 @@ try {
     { encoding: "utf8" },
   ).trim();
   await new Promise((resolve) => setTimeout(resolve, 200));
-  confirmations = 0;
   let pickerDisplays = 0;
+  const pickerFrames: string[][] = [];
   await psCmd.handler("", psContext([exitedPane, secondExitedPane], {
     keys: ["x", "\x1b"],
-    confirm: () => { confirmations++; return true; },
     onCustom: () => { pickerDisplays++; },
+    onRender: (lines: string[]) => { pickerFrames.push(lines); },
   }));
-  const exitedRemaining = Number(await paneExists(exitedPane)) + Number(await paneExists(secondExitedPane));
-  check("zellij-ps: exited pane closes directly", confirmations === 0 && exitedRemaining === 1);
-  check("zellij-ps: picker stays open after close", pickerDisplays === 2, `opened ${pickerDisplays} times`);
+  const firstExists = await paneExists(exitedPane);
+  const secondExists = await paneExists(secondExitedPane);
+  const exitedRemaining = Number(firstExists) + Number(secondExists);
+  const remainingPane = firstExists ? exitedPane : secondExitedPane;
+  const closedPane = firstExists ? secondExitedPane : exitedPane;
+  const finalFrame = pickerFrames.at(-1) ?? [];
+  check("zellij-ps: exited pane closes directly", exitedRemaining === 1);
+  check(
+    "zellij-ps: picker updates in place after close",
+    pickerDisplays === 1 && finalFrame.some((line) => line.includes(remainingPane)) && !finalFrame.some((line) => line.includes(closedPane)),
+    `opened ${pickerDisplays} times`,
+  );
 } finally {
   if (runningPane) await closePane(runningPane);
   if (exitedPane) await closePane(exitedPane);
