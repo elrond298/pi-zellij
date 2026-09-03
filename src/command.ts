@@ -3,7 +3,8 @@
  * optional workspace under ~/.worktrees.
  */
 import * as path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import { listPanes, runZellij } from "./cli.ts";
 import { parseZpArgs, resolveWorkspace } from "./workspace.ts";
 
@@ -37,7 +38,7 @@ export function registerZellijPi(pi: ExtensionAPI) {
 
 export function registerZellijPs(pi: ExtensionAPI) {
   pi.registerCommand("zellij-ps", {
-    description: "List panes created by zellij_run in this Pi session and bring one to the foreground",
+    description: "List, reveal, or close panes created by zellij_run in this Pi session",
     handler: async (_args: string, ctx) => {
       if (!process.env.ZELLIJ) {
         ctx.ui.notify("/zellij-ps only works inside a zellij session", "error");
@@ -59,17 +60,55 @@ export function registerZellijPs(pi: ExtensionAPI) {
         return;
       }
 
-      const choices = panes.map((pane) => {
-        const state = pane.exited ? `exited${pane.exit_status === null ? "" : ` (${pane.exit_status})`}` : "running";
-        return `terminal_${pane.id}  ${state}  ${pane.title || pane.pane_command || ""}`;
+      const items: SelectItem[] = panes.map((pane) => ({
+        value: `terminal_${pane.id}`,
+        label: `terminal_${pane.id}`,
+        description: `${pane.exited ? `exited${pane.exit_status === null ? "" : ` (${pane.exit_status})`}` : "running"}  ${pane.title || pane.pane_command || ""}`,
+      }));
+      const action = await ctx.ui.custom<{ paneId: string; close: boolean } | null>((tui, theme, _keybindings, done) => {
+        const container = new Container();
+        container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+        container.addChild(new Text(theme.fg("accent", theme.bold("zellij_run panes")), 1, 0));
+        const list = new SelectList(items, Math.min(items.length, 10), {
+          selectedPrefix: (text) => theme.fg("accent", text),
+          selectedText: (text) => theme.fg("accent", text),
+          description: (text) => theme.fg("muted", text),
+          scrollInfo: (text) => theme.fg("dim", text),
+          noMatch: (text) => theme.fg("warning", text),
+        });
+        list.onSelect = (item) => done({ paneId: item.value, close: false });
+        list.onCancel = () => done(null);
+        container.addChild(list);
+        container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter show • x close • esc cancel"), 1, 0));
+        container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+        return {
+          render: (width: number) => container.render(width),
+          invalidate: () => container.invalidate(),
+          handleInput: (data: string) => {
+            if (data === "x") {
+              const item = list.getSelectedItem();
+              if (item) done({ paneId: item.value, close: true });
+              return;
+            }
+            list.handleInput(data);
+            tui.requestRender();
+          },
+        };
       });
-      const choice = await ctx.ui.select("zellij_run panes", choices);
-      if (!choice) return;
+      if (!action) return;
 
-      const paneId = choice.split(/\s/, 1)[0];
-      const result = await runZellij(["action", "focus-pane-id", paneId]);
+      const pane = panes.find((candidate) => `terminal_${candidate.id}` === action.paneId);
+      if (action.close && pane && !pane.exited) {
+        const confirmed = await ctx.ui.confirm(`Close running pane ${action.paneId}?`, "Its process will be terminated.");
+        if (!confirmed) return;
+      }
+
+      const command = action.close
+        ? ["action", "close-pane", "--pane-id", action.paneId]
+        : ["action", "focus-pane-id", action.paneId];
+      const result = await runZellij(command);
       if (result.killed || result.code !== 0) {
-        ctx.ui.notify(`Failed to focus ${paneId}: ${result.stderr || result.stdout || `exit ${result.code}`}`, "error");
+        ctx.ui.notify(`Failed to ${action.close ? "close" : "focus"} ${action.paneId}: ${result.stderr || result.stdout || `exit ${result.code}`}`, "error");
       }
     },
   });

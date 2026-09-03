@@ -23,7 +23,7 @@ Prefer Pi's `bash` tool for short-lived noninteractive commands. Choose `zellij_
 
 Pass `session` to `zellij_run`, `zellij_send`, `zellij_wait`, and the other tools when work must run in a specific session. Omit it to use the current session, or the auto-created `pi` session when outside Zellij.
 
-By default, `zellij_run` pane targets start in the invoking Pi tab's floating layer without changing client focus. Use `/zellij-ps` to select and focus one, or Zellij's native floating-pane controls to reveal them; `target=tab` keeps its explicit new-tab behavior.
+By default, `zellij_run` pane targets start in the invoking Pi tab's floating layer without changing client focus. Use `/zellij-ps` to reveal them or press `x` there to close one; running panes require confirmation. Zellij's native floating-pane controls can also reveal them; `target=tab` keeps its explicit new-tab behavior.
 
 When the `zellij_*` tools are available, use them instead of issuing the raw CLI recipes below; the remaining sections are a reference for manual use and implementation work.
 

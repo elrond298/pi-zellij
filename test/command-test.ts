@@ -1,5 +1,5 @@
 /**
- * Test /zellij-pi. Must run INSIDE a zellij pane (zellij sets ZELLIJ=0 there),
+ * Test slash commands. Must run INSIDE a zellij pane (zellij sets ZELLIJ=0 there),
  * so `zellij action new-pane` targets the live session.
  * Run:  node --experimental-strip-types test/command-test.ts
  */
@@ -49,8 +49,22 @@ function fakeCtx(over: Record<string, unknown> = {}) {
       notify: (msg: string, level: string) => notifies.push({ level, msg }),
       select: async (title: string, opts: string[]) =>
         typeof over.select === "function" ? (over.select as Function)(title, opts) : (over.select ?? opts[0]),
+      custom: async (factory: Function) => {
+        let result: unknown = null;
+        const component = factory(
+          { requestRender() {} },
+          { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+          {},
+          (value: unknown) => { result = value; },
+        );
+        const lines = component.render(120);
+        if (typeof over.onRender === "function") (over.onRender as Function)(lines);
+        component.handleInput(over.key ?? "\r");
+        return result;
+      },
       input: async () => over.input ?? WS,
-      confirm: async () => over.confirm ?? true,
+      confirm: async (title: string, message: string) =>
+        typeof over.confirm === "function" ? (over.confirm as Function)(title, message) : (over.confirm ?? true),
     },
     ...over,
   };
@@ -77,40 +91,61 @@ function jj(args: string[]) {
   }
 }
 
-// --- /zellij-ps lists tracked panes and focuses the selected one -------------------
-const invokingPane = String(process.env.ZELLIJ_PANE_ID).startsWith("terminal_")
-  ? String(process.env.ZELLIJ_PANE_ID)
-  : `terminal_${process.env.ZELLIJ_PANE_ID}`;
-const psPane = execFs(
+// --- /zellij-ps shows panes, focuses on enter, closes on x ----------------------
+const psContext = (paneId: string, over: Record<string, unknown> = {}) =>
+  fakeCtx({
+    ...over,
+    sessionManager: {
+      getBranch: () => [
+        {
+          type: "message",
+          message: { role: "toolResult", toolName: "zellij_run", details: { pane_id: paneId, session: null } },
+        },
+      ],
+    },
+  });
+const paneExists = async (paneId: string) => (await listPanes()).some((pane: any) => `terminal_${pane.id}` === paneId);
+
+let runningPane = execFs(
   "zellij",
   ["action", "new-pane", "--floating", "--no-focus", "--name", "ps-command-test", "--", "sh", "-c", "sleep 20"],
   { encoding: "utf8" },
 ).trim();
-let psChoices: string[] = [];
+let exitedPane = "";
 try {
-  await psCmd.handler(
-    "",
-    fakeCtx({
-      sessionManager: {
-        getBranch: () => [
-          {
-            type: "message",
-            message: { role: "toolResult", toolName: "zellij_run", details: { pane_id: psPane, session: null } },
-          },
-        ],
-      },
-      select: (_title: string, choices: string[]) => {
-        psChoices = choices;
-        return choices.find((choice) => choice.startsWith(psPane));
-      },
-    }),
-  );
-  check("zellij-ps: tracked pane listed", psChoices.some((choice) => choice.includes(`${psPane}  running  ps-command-test`)), JSON.stringify(psChoices));
+  let rendered: string[] = [];
+  await psCmd.handler("", psContext(runningPane, { onRender: (lines: string[]) => { rendered = lines; } }));
+  check("zellij-ps: tracked pane listed", rendered.some((line) => line.includes(`${runningPane}`) && line.includes("running") && line.includes("ps-command-test")), JSON.stringify(rendered));
   const clients = execFs("zellij", ["action", "list-clients"], { encoding: "utf8" });
-  check("zellij-ps: selected pane focused", clients.includes(psPane), clients);
+  check("zellij-ps: enter focuses pane", clients.includes(runningPane), clients);
+
+  let confirmations = 0;
+  await psCmd.handler("", psContext(runningPane, {
+    key: "x",
+    confirm: () => { confirmations++; return false; },
+  }));
+  check("zellij-ps: running close asks confirmation", confirmations === 1 && await paneExists(runningPane));
+
+  await psCmd.handler("", psContext(runningPane, { key: "x", confirm: true }));
+  check("zellij-ps: confirmed running pane closed", !await paneExists(runningPane));
+  runningPane = "";
+
+  exitedPane = execFs(
+    "zellij",
+    ["action", "new-pane", "--floating", "--no-focus", "--name", "ps-exited-test", "--", "sh", "-c", "exit 7"],
+    { encoding: "utf8" },
+  ).trim();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  confirmations = 0;
+  await psCmd.handler("", psContext(exitedPane, {
+    key: "x",
+    confirm: () => { confirmations++; return true; },
+  }));
+  check("zellij-ps: exited pane closes directly", confirmations === 0 && !await paneExists(exitedPane));
+  exitedPane = "";
 } finally {
-  execFs("zellij", ["action", "focus-pane-id", invokingPane], { stdio: "ignore" });
-  await closePane(psPane);
+  if (runningPane) await closePane(runningPane);
+  if (exitedPane) await closePane(exitedPane);
 }
 
 // --- case 1: --cwd opens a new pane named pi with the given cwd -----------------
