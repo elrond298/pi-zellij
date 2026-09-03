@@ -43,7 +43,7 @@ Pi keeps its built-in `bash` tool. The model chooses `bash` for short, nonintera
 
 ### Slash command
 
-`/zellij-ps` lists panes created by `zellij_run` in the current Pi session. Press Enter to reveal one, or `x` to close it; running panes require confirmation, exited panes close immediately.
+`/zellij-ps` lists panes created by `zellij_run` in the current Pi session, including panes from still-running tool calls. Press Enter to reveal one, or `x` to close it; running panes require confirmation, exited panes close immediately, and the picker stays open after closing.
 
 `/zellij-pi` (inside a zellij session) opens a new pi in a new pane, or tab with `--tab`:
 - `--cwd <dir>` or a positional `<dir>` — open pi there; relative paths resolve against the current cwd

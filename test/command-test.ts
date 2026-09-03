@@ -9,9 +9,10 @@ import { default as ext } from "../src/index.ts";
 
 const pexec = promisify(execFile);
 
+const tools = new Map<string, any>();
 const commands = new Map<string, { handler: Function; description?: string }>();
 const fakePi: any = {
-  registerTool: () => {},
+  registerTool: (def: any) => tools.set(def.name, def),
   registerCommand: (name: string, def: any) => commands.set(name, def),
   exec: async (bin: string, args: string[], opts?: any) => {
     try {
@@ -24,9 +25,10 @@ const fakePi: any = {
 };
 
 ext(fakePi);
+const runTool = tools.get("zellij_run");
 const cmd = commands.get("zellij-pi");
 const psCmd = commands.get("zellij-ps");
-if (!cmd || !psCmd) {
+if (!runTool || !cmd || !psCmd) {
   console.log("FAIL  commands not registered");
   process.exit(1);
 }
@@ -43,6 +45,7 @@ const wsDir = `${HOME}/.worktrees/${PROJ}/${WS}`;
 let failures = 0;
 const notifies: { level: string; msg: string }[] = [];
 function fakeCtx(over: Record<string, unknown> = {}) {
+  let customCalls = 0;
   return {
     cwd: `${HOME}/opt/${PROJ}`, // inside the pi-zellij repo
     ui: {
@@ -59,7 +62,10 @@ function fakeCtx(over: Record<string, unknown> = {}) {
         );
         const lines = component.render(120);
         if (typeof over.onRender === "function") (over.onRender as Function)(lines);
-        component.handleInput(over.key ?? "\r");
+        if (typeof over.onCustom === "function") (over.onCustom as Function)(customCalls);
+        const key = String(Array.isArray(over.keys) ? over.keys[customCalls] ?? "\x1b" : over.key ?? "\r");
+        customCalls++;
+        component.handleInput(key);
         return result;
       },
       input: async () => over.input ?? WS,
@@ -92,41 +98,43 @@ function jj(args: string[]) {
 }
 
 // --- /zellij-ps shows panes, focuses on enter, closes on x ----------------------
-const psContext = (paneId: string, over: Record<string, unknown> = {}) =>
+const psContext = (paneIds: string[], over: Record<string, unknown> = {}) =>
   fakeCtx({
     ...over,
     sessionManager: {
-      getBranch: () => [
-        {
-          type: "message",
-          message: { role: "toolResult", toolName: "zellij_run", details: { pane_id: paneId, session: null } },
-        },
-      ],
+      getBranch: () => paneIds.map((paneId) => ({
+        type: "message",
+        message: { role: "toolResult", toolName: "zellij_run", details: { pane_id: paneId, session: null } },
+      })),
     },
   });
 const paneExists = async (paneId: string) => (await listPanes()).some((pane: any) => `terminal_${pane.id}` === paneId);
 
-let runningPane = execFs(
-  "zellij",
-  ["action", "new-pane", "--floating", "--no-focus", "--name", "ps-command-test", "--", "sh", "-c", "sleep 20"],
-  { encoding: "utf8" },
-).trim();
+const runningResult = await runTool.execute(
+  "ps-command-test",
+  { command: "sleep 20", wait: "none", name: "ps-command-test" },
+  undefined,
+  () => {},
+  { cwd: `${HOME}/opt/${PROJ}` },
+);
+let runningPane = String(runningResult.details.pane_id);
 let exitedPane = "";
+let secondExitedPane = "";
 try {
   let rendered: string[] = [];
-  await psCmd.handler("", psContext(runningPane, { onRender: (lines: string[]) => { rendered = lines; } }));
-  check("zellij-ps: tracked pane listed", rendered.some((line) => line.includes(`${runningPane}`) && line.includes("running") && line.includes("ps-command-test")), JSON.stringify(rendered));
+  await psCmd.handler("", psContext([], { onRender: (lines: string[]) => { rendered = lines; } }));
+  check("zellij-ps: active pane listed before tool result", rendered.some((line) => line.includes(`${runningPane}`) && line.includes("running") && line.includes("ps-command-test")), JSON.stringify(rendered));
   const clients = execFs("zellij", ["action", "list-clients"], { encoding: "utf8" });
   check("zellij-ps: enter focuses pane", clients.includes(runningPane), clients);
 
   let confirmations = 0;
-  await psCmd.handler("", psContext(runningPane, {
-    key: "x",
+  await psCmd.handler("", psContext([runningPane], {
+    keys: ["x", "\x1b"],
     confirm: () => { confirmations++; return false; },
   }));
   check("zellij-ps: running close asks confirmation", confirmations === 1 && await paneExists(runningPane));
 
-  await psCmd.handler("", psContext(runningPane, { key: "x", confirm: true }));
+  await psCmd.handler("", psContext([runningPane], { key: "x", confirm: true }));
   check("zellij-ps: confirmed running pane closed", !await paneExists(runningPane));
   runningPane = "";
 
@@ -135,17 +143,26 @@ try {
     ["action", "new-pane", "--floating", "--no-focus", "--name", "ps-exited-test", "--", "sh", "-c", "exit 7"],
     { encoding: "utf8" },
   ).trim();
+  secondExitedPane = execFs(
+    "zellij",
+    ["action", "new-pane", "--floating", "--no-focus", "--name", "ps-exited-test-2", "--", "sh", "-c", "exit 8"],
+    { encoding: "utf8" },
+  ).trim();
   await new Promise((resolve) => setTimeout(resolve, 200));
   confirmations = 0;
-  await psCmd.handler("", psContext(exitedPane, {
-    key: "x",
+  let pickerDisplays = 0;
+  await psCmd.handler("", psContext([exitedPane, secondExitedPane], {
+    keys: ["x", "\x1b"],
     confirm: () => { confirmations++; return true; },
+    onCustom: () => { pickerDisplays++; },
   }));
-  check("zellij-ps: exited pane closes directly", confirmations === 0 && !await paneExists(exitedPane));
-  exitedPane = "";
+  const exitedRemaining = Number(await paneExists(exitedPane)) + Number(await paneExists(secondExitedPane));
+  check("zellij-ps: exited pane closes directly", confirmations === 0 && exitedRemaining === 1);
+  check("zellij-ps: picker stays open after close", pickerDisplays === 2, `opened ${pickerDisplays} times`);
 } finally {
   if (runningPane) await closePane(runningPane);
   if (exitedPane) await closePane(exitedPane);
+  if (secondExitedPane) await closePane(secondExitedPane);
 }
 
 // --- case 1: --cwd opens a new pane named pi with the given cwd -----------------

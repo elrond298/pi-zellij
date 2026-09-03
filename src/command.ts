@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { DynamicBorder, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import { listPanes, runZellij } from "./cli.ts";
+import { currentSessionRunPanes } from "./run.ts";
 import { parseZpArgs, resolveWorkspace } from "./workspace.ts";
 
 export function registerZellijPi(pi: ExtensionAPI) {
@@ -45,70 +46,82 @@ export function registerZellijPs(pi: ExtensionAPI) {
         return;
       }
 
-      const paneIds = new Set<string>();
+      const historicalPaneIds = new Set<string>();
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "zellij_run") continue;
         const details = entry.message.details as { pane_id?: unknown; session?: unknown } | undefined;
-        if (typeof details?.pane_id === "string" && details.session == null) paneIds.add(details.pane_id);
+        if (typeof details?.pane_id === "string" && details.session == null) historicalPaneIds.add(details.pane_id);
       }
 
-      const panes = (await listPanes([]))
-        .filter((pane) => paneIds.has(`terminal_${pane.id}`))
-        .sort((a, b) => Number(a.exited) - Number(b.exited) || b.id - a.id);
-      if (panes.length === 0) {
-        ctx.ui.notify("No zellij_run panes available in this Pi session", "info");
-        return;
-      }
+      let showedPanes = false;
+      while (true) {
+        const paneIds = new Set([...historicalPaneIds, ...currentSessionRunPanes]);
+        const panes = (await listPanes([]))
+          .filter((pane) => paneIds.has(`terminal_${pane.id}`))
+          .sort((a, b) => Number(a.exited) - Number(b.exited) || b.id - a.id);
+        if (panes.length === 0) {
+          if (!showedPanes) ctx.ui.notify("No zellij_run panes available in this Pi session", "info");
+          return;
+        }
+        showedPanes = true;
 
-      const items: SelectItem[] = panes.map((pane) => ({
-        value: `terminal_${pane.id}`,
-        label: `terminal_${pane.id}`,
-        description: `${pane.exited ? `exited${pane.exit_status === null ? "" : ` (${pane.exit_status})`}` : "running"}  ${pane.title || pane.pane_command || ""}`,
-      }));
-      const action = await ctx.ui.custom<{ paneId: string; close: boolean } | null>((tui, theme, _keybindings, done) => {
-        const container = new Container();
-        container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-        container.addChild(new Text(theme.fg("accent", theme.bold("zellij_run panes")), 1, 0));
-        const list = new SelectList(items, Math.min(items.length, 10), {
-          selectedPrefix: (text) => theme.fg("accent", text),
-          selectedText: (text) => theme.fg("accent", text),
-          description: (text) => theme.fg("muted", text),
-          scrollInfo: (text) => theme.fg("dim", text),
-          noMatch: (text) => theme.fg("warning", text),
+        const items: SelectItem[] = panes.map((pane) => ({
+          value: `terminal_${pane.id}`,
+          label: `terminal_${pane.id}`,
+          description: `${pane.exited ? `exited${pane.exit_status === null ? "" : ` (${pane.exit_status})`}` : "running"}  ${pane.title || pane.pane_command || ""}`,
+        }));
+        const action = await ctx.ui.custom<{ paneId: string; close: boolean } | null>((tui, theme, _keybindings, done) => {
+          const container = new Container();
+          container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+          container.addChild(new Text(theme.fg("accent", theme.bold("zellij_run panes")), 1, 0));
+          const list = new SelectList(items, Math.min(items.length, 10), {
+            selectedPrefix: (text) => theme.fg("accent", text),
+            selectedText: (text) => theme.fg("accent", text),
+            description: (text) => theme.fg("muted", text),
+            scrollInfo: (text) => theme.fg("dim", text),
+            noMatch: (text) => theme.fg("warning", text),
+          });
+          list.onSelect = (item) => done({ paneId: item.value, close: false });
+          list.onCancel = () => done(null);
+          container.addChild(list);
+          container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter show • x close • esc cancel"), 1, 0));
+          container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+          return {
+            render: (width: number) => container.render(width),
+            invalidate: () => container.invalidate(),
+            handleInput: (data: string) => {
+              if (data === "x") {
+                const item = list.getSelectedItem();
+                if (item) done({ paneId: item.value, close: true });
+                return;
+              }
+              list.handleInput(data);
+              tui.requestRender();
+            },
+          };
         });
-        list.onSelect = (item) => done({ paneId: item.value, close: false });
-        list.onCancel = () => done(null);
-        container.addChild(list);
-        container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter show • x close • esc cancel"), 1, 0));
-        container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-        return {
-          render: (width: number) => container.render(width),
-          invalidate: () => container.invalidate(),
-          handleInput: (data: string) => {
-            if (data === "x") {
-              const item = list.getSelectedItem();
-              if (item) done({ paneId: item.value, close: true });
-              return;
-            }
-            list.handleInput(data);
-            tui.requestRender();
-          },
-        };
-      });
-      if (!action) return;
+        if (!action) return;
 
-      const pane = panes.find((candidate) => `terminal_${candidate.id}` === action.paneId);
-      if (action.close && pane && !pane.exited) {
-        const confirmed = await ctx.ui.confirm(`Close running pane ${action.paneId}?`, "Its process will be terminated.");
-        if (!confirmed) return;
-      }
+        const pane = panes.find((candidate) => `terminal_${candidate.id}` === action.paneId);
+        if (action.close) {
+          if (pane && !pane.exited) {
+            const confirmed = await ctx.ui.confirm(`Close running pane ${action.paneId}?`, "Its process will be terminated.");
+            if (!confirmed) continue;
+          }
+          const result = await runZellij(["action", "close-pane", "--pane-id", action.paneId]);
+          if (result.killed || result.code !== 0) {
+            ctx.ui.notify(`Failed to close ${action.paneId}: ${result.stderr || result.stdout || `exit ${result.code}`}`, "error");
+          } else {
+            currentSessionRunPanes.delete(action.paneId);
+          }
+          continue;
+        }
 
-      const command = action.close
-        ? ["action", "close-pane", "--pane-id", action.paneId]
-        : ["action", "focus-pane-id", action.paneId];
-      const result = await runZellij(command);
-      if (result.killed || result.code !== 0) {
-        ctx.ui.notify(`Failed to ${action.close ? "close" : "focus"} ${action.paneId}: ${result.stderr || result.stdout || `exit ${result.code}`}`, "error");
+        const result = await runZellij(["action", "focus-pane-id", action.paneId]);
+        if (result.killed || result.code !== 0) {
+          ctx.ui.notify(`Failed to focus ${action.paneId}: ${result.stderr || result.stdout || `exit ${result.code}`}`, "error");
+        }
+        return;
       }
     },
   });

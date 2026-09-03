@@ -25,6 +25,7 @@ const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 class CleanupError extends Error {}
 
+export const currentSessionRunPanes = new Set<string>();
 async function findMarkedPane(before: Set<number>, marker: string, sessionArgs: string[]) {
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
@@ -149,6 +150,7 @@ export async function createCommandPane(command: string[], options: PaneOptions)
       }
       throw new Error("aborted");
     }
+    if (options.sessionArgs.length === 0) currentSessionRunPanes.add(paneId);
     return { paneId, tabId: null };
   }
 
@@ -184,6 +186,7 @@ export async function createCommandPane(command: string[], options: PaneOptions)
       }
     }
     if (options.signal?.aborted) throw new Error("aborted");
+    if (options.sessionArgs.length === 0) currentSessionRunPanes.add(paneId);
     return { paneId, tabId };
   } catch (error) {
     const cleaned = await closeTab(options.sessionArgs, tabId);
