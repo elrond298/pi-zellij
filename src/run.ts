@@ -89,6 +89,7 @@ async function launchPane(
 ): Promise<string> {
   const marker = `pi-run-${randomUUID()}`;
   const args = [...options.sessionArgs, "action", "new-pane", "--name", marker];
+  if (tabId === undefined) args.push("--floating");
   if (options.sessionArgs.length === 0) args.push("--no-focus");
   if (tabId === undefined && options.sessionArgs.length === 0) args.push("--near-current-pane");
   else if (tabId !== undefined) args.push("--tab-id", String(tabId));

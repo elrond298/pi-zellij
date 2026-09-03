@@ -19,9 +19,11 @@ Check sessions: `zellij list-sessions`. Create a headless one: `zellij attach --
 
 ## Core workflow
 
-Prefer Pi's `bash` tool for short-lived noninteractive commands. Choose `zellij_run` when a command may be interactive or long-running, or when its live output should be visible to the user; the tools remain separate and nothing reroutes `bash` automatically.
+Prefer Pi's `bash` tool for short-lived noninteractive commands. Choose `zellij_run` when a command may be interactive or long-running, needs a PTY, or should remain available in Zellij; the tools remain separate and nothing reroutes `bash` automatically.
 
 Pass `session` to `zellij_run`, `zellij_send`, `zellij_wait`, and the other tools when work must run in a specific session. Omit it to use the current session, or the auto-created `pi` session when outside Zellij.
+
+By default, `zellij_run` pane targets start in the invoking Pi tab's floating layer without changing client focus. Use Zellij's native floating-pane controls to reveal and interact with them; `target=tab` keeps its explicit new-tab behavior.
 
 When the `zellij_*` tools are available, use them instead of issuing the raw CLI recipes below; the remaining sections are a reference for manual use and implementation work.
 

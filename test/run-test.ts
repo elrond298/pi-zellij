@@ -97,6 +97,7 @@ try {
       const created = afterPlacement.find((pane) => `terminal_${pane.id}` === placedPane);
       const focusedAfter = afterPlacement.filter((pane) => pane.is_focused).map((pane) => pane.id).sort();
       check("default pane stays in Pi tab", created?.tab_id === piPane?.tab_id, JSON.stringify({ piPane, created }));
+      check("default pane is floating", created?.is_floating === true, JSON.stringify(created));
       check("default pane preserves focus", JSON.stringify(focusedAfter) === JSON.stringify(focusedBefore), JSON.stringify({ focusedBefore, focusedAfter }));
     } finally {
       if (placedPane) execFileSync("zellij", ["action", "close-pane", "--pane-id", placedPane], { stdio: "ignore" });

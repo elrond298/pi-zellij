@@ -14,11 +14,11 @@ export function registerTools(pi: ExtensionAPI) {
     name: "zellij_run",
     label: "Zellij: Run Command",
     description:
-      "Run a command visibly in a new Zellij pane or tab. Use for interactive, long-running, or user-visible commands; use bash for short-lived noninteractive commands. " +
+      "Run a command in a new Zellij floating pane or tab. Use for interactive, long-running, or user-visible commands; use bash for short-lived noninteractive commands. " +
       "Waited commands stream output into Pi and return bash-compatible output and errors. Detached commands return the pane id immediately. " +
-      "By default, a pane opens beside the invoking Pi pane without changing client focus. An explicit session is auto-created when absent.",
+      "By default, a pane starts in the invoking Pi tab's floating layer without changing client focus. An explicit session is auto-created when absent.",
 
-    promptSnippet: "Run an interactive, long-running, or user-visible command in a Zellij pane or tab",
+    promptSnippet: "Run an interactive, long-running, or user-visible command in a Zellij floating pane or tab",
     promptGuidelines: [
       "Use zellij_run only for interactive, long-running, or user-visible terminal work. Use bash for short-lived noninteractive commands.",
       "For interactive apps (TUIs, REPLs, editors), spawn with zellij_run wait=none and drive it with zellij_send / zellij_wait / zellij_close.",
