@@ -89,6 +89,7 @@ try {
     const beforePlacement = listCurrent();
     const piPane = beforePlacement.find((pane) => String(pane.id) === process.env.ZELLIJ_PANE_ID);
     const focusedBefore = beforePlacement.filter((pane) => pane.is_focused).map((pane) => pane.id).sort();
+    const clientsBefore = execFileSync("zellij", ["action", "list-clients"], { encoding: "utf8" });
     let placedPane: string | undefined;
     try {
       const placed = await call({ command: "sleep 20", wait: "none", session: undefined });
@@ -101,6 +102,8 @@ try {
       check("default pane preserves focus", JSON.stringify(focusedAfter) === JSON.stringify(focusedBefore), JSON.stringify({ focusedBefore, focusedAfter }));
     } finally {
       if (placedPane) execFileSync("zellij", ["action", "close-pane", "--pane-id", placedPane], { stdio: "ignore" });
+      const clientsAfterClose = execFileSync("zellij", ["action", "list-clients"], { encoding: "utf8" });
+      check("closing default pane preserves client focus", clientsAfterClose === clientsBefore, JSON.stringify({ clientsBefore, clientsAfterClose }));
     }
   }
 

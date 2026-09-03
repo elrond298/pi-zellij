@@ -91,8 +91,7 @@ async function launchPane(
   const args = [...options.sessionArgs, "action", "new-pane", "--name", marker];
   if (tabId === undefined) args.push("--floating");
   if (options.sessionArgs.length === 0) args.push("--no-focus");
-  if (tabId === undefined && options.sessionArgs.length === 0) args.push("--near-current-pane");
-  else if (tabId !== undefined) args.push("--tab-id", String(tabId));
+  if (tabId !== undefined) args.push("--tab-id", String(tabId));
   args.push("--cwd", options.cwd);
   if (options.closeOnExit) args.push("--close-on-exit");
   args.push("--", ...command);
