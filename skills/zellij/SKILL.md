@@ -23,7 +23,17 @@ Prefer Pi's `bash` tool for short-lived noninteractive commands. Choose `zellij_
 
 Pass `session` to `zellij_run`, `zellij_send`, `zellij_wait`, and the other tools when work must run in a specific session. Omit it to use the current session, or the auto-created `pi` session when outside Zellij.
 
-By default, `zellij_run` pane targets start in the invoking Pi tab's floating layer without changing client focus. Use `/zellij-ps` to reveal them or press `x` there to close one; still-running tool calls are listed immediately, running panes require inline confirmation, and a close updates only the picker list in place. Zellij's native floating-pane controls can also reveal them; `target=tab` keeps its explicit new-tab behavior.
+By default, `zellij_run` pane targets start in the invoking Pi tab's floating layer without changing client focus. `/zellij-ps` lists panes from the current Pi session, including still-running tool calls: use ↑/↓ to select, Enter to reveal and focus, `x` to close, and Esc to cancel. Closing a running pane requires inline confirmation; exited panes close immediately, and successful closes update only the picker list in place. Zellij's native floating-pane controls can also reveal them; `target=tab` keeps its explicit new-tab behavior.
+
+The native background-pane sequence is:
+
+```bash
+PANE_ID=$(zellij action new-pane --floating --no-focus --name worker --cwd "$PWD" -- command)
+# later: reveal all floating panes, or use /zellij-ps to focus this pane
+zellij action show-floating-panes
+```
+
+`--floating` puts the pane in the current tab's floating layer, while `--no-focus` preserves the user's focused pane and tab. A closed floating layer remains closed, so the pane runs out of sight; if that layer was already open, the pane is visible but unfocused. Do not add `--near-current-pane`: closing such a pane can move the client to another tab. For explicit cross-session targeting, omit `--no-focus` because it can misroute pane creation.
 
 When the `zellij_*` tools are available, use them instead of issuing the raw CLI recipes below; the remaining sections are a reference for manual use and implementation work.
 

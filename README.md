@@ -1,6 +1,6 @@
 # pi-zellij
 
-Reliable [zellij](https://zellij.dev) control for [pi](https://github.com/earendil-works/pi-coding-agent): **one extension** (7 tools + a slash command) and **one skill**, bundled in a single package.
+Reliable [zellij](https://zellij.dev) control for [pi](https://github.com/earendil-works/pi-coding-agent): **one extension** (7 tools + 2 slash commands) and **one skill**, bundled in a single package.
 
 Requirements: pi, zellij ≥ 0.40.
 
@@ -8,9 +8,9 @@ Requirements: pi, zellij ≥ 0.40.
 
 | Piece | Location | What it does |
 |---|---|---|
-| **Extension** | `src/` | 7 custom tools that wrap `zellij action`/`subscribe` with reliability built in (real exit codes, timeouts, no sleep-guessing), plus the `/zellij-pi` slash command |
+| **Extension** | `src/` | 7 custom tools that wrap `zellij action`/`subscribe` with reliability built in (real exit codes, timeouts, no sleep-guessing), plus `/zellij-ps` and `/zellij-pi` |
 | **Skill** | `skills/zellij/` | Teaches pi to drive zellij through subprocess calls — no socket or library. Loads whenever pi needs to run something in a pane, read pane output, or manage panes/sessions |
-| Tests | `test/` | Live-session tests for the tools and the slash command |
+| Tests | `test/` | Live-session tests for the tools and slash commands |
 | Package manifest | `package.json` | The pi package structure — `pi.extensions` / `pi.skills` point at the extension and skill |
 
 ## Installation
@@ -41,9 +41,34 @@ All tools auto-resolve the session: explicit `session` (auto-created headless if
 
 Pi keeps its built-in `bash` tool. The model chooses `bash` for short, noninteractive commands and `zellij_run` for long-running, interactive, or user-visible work; the extension does not intercept or reroute bash automatically.
 
-### Slash command
+### Background floating panes
 
-`/zellij-ps` lists panes created by `zellij_run` in the current Pi session, including panes from still-running tool calls. Press Enter to reveal one, or `x` to close it; running panes require inline confirmation, exited panes close immediately, and the picker updates only its list instead of reopening.
+For the default `target="pane"`, `zellij_run` starts the command as a native Zellij floating pane:
+
+```bash
+zellij action new-pane --name <temporary-marker> --floating --no-focus --cwd <dir> -- <command>
+```
+
+The procedure is:
+
+1. Snapshot the existing pane IDs, create the pane with a unique temporary title, then resolve and rename its returned pane ID.
+2. `--floating` places it in the invoking Pi tab's floating layer; `--no-focus` leaves the user's current pane and tab focused.
+3. If the floating layer is closed, it stays closed, so the command runs out of sight. If the layer is already open, the new pane is visible but still does not take focus.
+4. Register the pane immediately so `/zellij-ps` can list it while its tool call is still running.
+5. For waited runs, execute through a wrapper that tees output to Pi and records the real exit status. `wait="none"` returns the pane ID immediately.
+6. Reveal it later with `/zellij-ps` (or Zellij's floating-pane toggle); the process already owns a PTY and is ready for interaction.
+
+When `session` explicitly targets another Zellij session, `zellij_run` omits `--no-focus`: Zellij can otherwise route cross-session pane creation incorrectly. `target="tab"` uses the separate explicit new-tab flow.
+
+### Slash commands
+
+`/zellij-ps` opens a picker for panes created by `zellij_run` in the current Pi session, including panes from tool calls that are still running:
+- `↑` / `↓` — select a pane
+- `Enter` — reveal and focus the selected floating pane
+- `x` — close the selected pane; running panes require inline confirmation, while exited panes close immediately
+- `Esc` — close the picker
+
+After a pane closes, only the picker list is updated; the surrounding Pi interface is not reopened or globally refreshed.
 
 `/zellij-pi` (inside a zellij session) opens a new pi in a new pane, or tab with `--tab`:
 - `--cwd <dir>` or a positional `<dir>` — open pi there; relative paths resolve against the current cwd

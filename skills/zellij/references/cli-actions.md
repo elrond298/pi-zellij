@@ -12,6 +12,22 @@ Full reference for `zellij action`, `zellij subscribe`, and session management (
 | `action close-tab` | Closes the current tab. |
 | `action edit <file>` | Opens file in a new pane with `$EDITOR`; prints pane id. |
 
+
+### Start hidden, reveal later
+
+A native floating pane can run in the background without changing the user's current focus:
+
+```bash
+PANE_ID=$(zellij action new-pane --floating --no-focus --name worker --cwd "$PWD" -- command)
+# The floating layer stays closed if it was closed.
+
+zellij action show-floating-panes                       # reveal the layer later
+# or focus one known pane directly:
+zellij action focus-pane-id "$PANE_ID"
+```
+
+This pane has a PTY from the start, so it remains interactive when revealed. If the floating layer was already open, the pane is visible immediately but remains unfocused. Avoid combining `--near-current-pane` with this pattern: closing the pane can move the client to another tab. When targeting another session with `zellij --session NAME`, omit `--no-focus`; it can cause cross-session creation to land in the wrong session.
+
 ## Send input
 
 | Action | Notes |
