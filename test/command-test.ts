@@ -191,7 +191,7 @@ if (cwdPane) await closePane(cwdPane.id);
 notifies.length = 0;
 await cmd.handler(`--tab --workspace ${WS}`, fakeCtx());
 check("workspace: notified success", notifies.some((n) => n.level === "info" && n.msg.includes(wsDir)), JSON.stringify(notifies));
-const { existsSync } = await import("node:fs");
+const { existsSync, readFileSync, readdirSync, writeFileSync } = await import("node:fs");
 check("workspace: dir created", existsSync(wsDir), wsDir);
 check("workspace: jj workspace registered", jj(["workspace", "list"]).includes(`.worktrees/${PROJ}/${WS}`), jj(["workspace", "list"]).slice(0, 120));
 panes = await listPanes();
@@ -260,6 +260,53 @@ try {
   execFs("git", ["-C", GIT_REPO, "branch", "-D", WS]);
 } catch {}
 execFs("rm", ["-rf", GIT_REPO, gitWsDir]);
+// --- case 7: --fork opens pi on a fork of the current session --------------------
+const FORK_CWD = "/tmp/zp-fork-test";
+const forkSource = "/tmp/zp-fork-source.jsonl";
+const forkDir = `${HOME}/.pi/agent/sessions/--tmp-zp-fork-test--`;
+const forkMarker = "zp-fork-marker-93f1";
+execFs("rm", ["-rf", FORK_CWD, forkDir]);
+execFs("mkdir", ["-p", FORK_CWD]);
+writeFileSync(
+  forkSource,
+  [
+    JSON.stringify({ type: "session", version: 3, id: "3f2504e0-4f89-41d3-9a0c-0305e82c3301", timestamp: new Date().toISOString(), cwd: "/tmp" }),
+    JSON.stringify({
+      type: "message",
+      id: "m1",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message: { role: "user", content: [{ type: "text", text: forkMarker }], timestamp: Date.now() },
+    }),
+  ].join("\n") + "\n",
+);
+notifies.length = 0;
+await cmd.handler(`--fork --cwd ${FORK_CWD}`, fakeCtx({ sessionManager: { getSessionFile: () => forkSource } }));
+check("fork: notified success", notifies.some((n) => n.level === "info" && n.msg.includes(FORK_CWD)), JSON.stringify(notifies));
+panes = await listPanes();
+const forkPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd === FORK_CWD);
+check("fork: pi pane created", !!forkPane, JSON.stringify((panes as any[]).map((p) => [p.id, p.title, p.pane_cwd])));
+let forked = false;
+for (let i = 0; i < 50 && !forked; i++) {
+  try {
+    const file = readdirSync(forkDir).find((f) => f.endsWith(".jsonl"));
+    forked = !!file && readFileSync(`${forkDir}/${file}`, "utf8").includes(forkMarker);
+  } catch {}
+  if (!forked) await new Promise((resolve) => setTimeout(resolve, 100));
+}
+check("fork: new session carries the source history", forked, forkDir);
+if (forkPane) await closePane(forkPane.id);
+notifies.length = 0;
+await cmd.handler(`--fork --cwd ${FORK_CWD}`, fakeCtx({ sessionManager: { getSessionFile: () => "/tmp/zp-fork-missing.jsonl" } }));
+check("fork: no saved history warns and still opens fresh", notifies.some((n) => n.level === "warning" && n.msg.includes("Nothing to fork")), JSON.stringify(notifies));
+panes = await listPanes();
+const freshPane = panes.find((p: any) => p.title === "pi" && p.pane_cwd === FORK_CWD);
+check("fork: fresh pane opened for empty session", !!freshPane);
+if (freshPane) await closePane(freshPane.id);
+try {
+  execFs("rm", ["-rf", FORK_CWD, forkDir, forkSource]);
+} catch {}
+
 // --- cleanup: forget the jj workspace (by name) and remove the dir ----------------
 console.log("cleanup:", jj(["workspace", "forget", WS]).slice(0, 80));
 const { execFileSync } = await import("node:child_process");

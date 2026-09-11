@@ -71,6 +71,7 @@ When `session` explicitly targets another Zellij session, `zellij_run` omits `--
 After a pane closes, only the picker list is updated; the surrounding Pi interface is not reopened or globally refreshed.
 
 `/zellij-pi` (inside a zellij session) opens a new pi in a new pane, or tab with `--tab`:
+- `--fork` — start the new pi as a fork of the current session (`pi --fork <current-session-file>`), so it carries the conversation so far while diverging from here on. Combine with `--cwd`/`--workspace` to fork into another directory or worktree.
 - `--cwd <dir>` or a positional `<dir>` — open pi there; relative paths resolve against the current cwd
 - `--workspace [project/]name` — a workspace under `~/.worktrees/<project>/<name>` (the pi-worktree convention); without a name, pick interactively from existing workspaces or create one. Workspace creation mirrors pi-worktree: `git worktree add -b <name>` for git repos, `jj workspace add` for jj repos, `mkdir` + init for bare directories. A bare name uses the repo at the current cwd as the project; pass `project/name` explicitly for another project
 

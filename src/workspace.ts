@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 
 export interface ZpArgs {
   tab: boolean;
+  fork: boolean;
   cwd?: string;
   workspace?: string;
   workspaceSet: boolean;
@@ -25,11 +26,12 @@ export function tokenize(args: string): string[] {
 }
 
 export function parseZpArgs(args: string): ZpArgs {
-  const out: ZpArgs = { tab: false, workspaceSet: false };
+  const out: ZpArgs = { tab: false, fork: false, workspaceSet: false };
   const toks = tokenize(args);
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
     if (t === "--tab") out.tab = true;
+    else if (t === "--fork") out.fork = true;
     else if (t === "--cwd") out.cwd = toks[++i];
     else if (t.startsWith("--cwd=")) out.cwd = t.slice("--cwd=".length);
     else if (t === "--workspace") {

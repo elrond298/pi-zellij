@@ -2,6 +2,7 @@
  * Slash commands: reveal zellij_run panes, or open a new Pi pane/tab with an
  * optional workspace under ~/.worktrees.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { DynamicBorder, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
@@ -13,13 +14,25 @@ export function registerZellijPi(pi: ExtensionAPI) {
   pi.registerCommand("zellij-pi", {
     description:
       "Open a new pi instance in a new zellij pane (or tab with --tab). " +
-      "Flags: --cwd <dir> (default: current dir), --workspace [project/]name (a workspace under ~/.worktrees/<project>/<name>; a git repo creates a git worktree, a jj repo adds a jj workspace, otherwise mkdir + jj/git init).",
+      "Flags: --fork (fork this Pi session into the new pane), --cwd <dir> (default: current dir), --workspace [project/]name (a workspace under ~/.worktrees/<project>/<name>; a git repo creates a git worktree, a jj repo adds a jj workspace, otherwise mkdir + jj/git init).",
     handler: async (args: string, ctx) => {
       if (!process.env.ZELLIJ) {
         ctx.ui.notify("/zellij-pi only works inside a zellij session", "error");
         return;
       }
       const a = parseZpArgs(args);
+      let forkSessionFile: string | undefined;
+      if (a.fork) {
+        const sessionFile = ctx.sessionManager.getSessionFile();
+        if (!sessionFile) {
+          ctx.ui.notify("Cannot --fork: this Pi session is not persisted (--no-session)", "error");
+          return;
+        }
+        // pi only writes the file once an assistant message exists, so a brand-new
+        // session has nothing to fork yet — open it fresh instead of a dead pane.
+        if (fs.existsSync(sessionFile)) forkSessionFile = sessionFile;
+        else ctx.ui.notify("Nothing to fork yet — this session has no saved history; opening a fresh one", "warning");
+      }
       let dir = a.cwd ? (path.isAbsolute(a.cwd) ? a.cwd : path.resolve(ctx.cwd, a.cwd)) : ctx.cwd;
       if (a.workspaceSet) {
         const ws = await resolveWorkspace(a.workspace, ctx, pi);
@@ -27,7 +40,8 @@ export function registerZellijPi(pi: ExtensionAPI) {
         dir = ws;
       }
       const target = a.tab ? "new-tab" : "new-pane";
-      const res = await runZellij(["action", target, "--cwd", dir, "--name", "pi", "--", "pi"]);
+      const piArgs = ["pi", ...(forkSessionFile ? ["--fork", forkSessionFile] : [])];
+      const res = await runZellij(["action", target, "--cwd", dir, "--name", "pi", "--", ...piArgs]);
       if (res.killed || res.code !== 0) {
         ctx.ui.notify(`Failed to open pi in a new ${target}: ${res.stderr || res.stdout || `exit ${res.code}`}`, "error");
         return;
