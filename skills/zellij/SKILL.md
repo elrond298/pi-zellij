@@ -8,6 +8,47 @@ compatibility: zellij >= 0.40
 
 Control zellij entirely through subprocess calls — `zellij action <subcommand>`, `zellij subscribe`, `zellij attach`. No socket or library. Structured output is available as JSON on stdout.
 
+## Scope: your side and the human's side
+
+You drive panes with the `zellij_*` tools (or the raw CLI below). The human has controls you do not: `/zellij-ps` reveals, focuses, and closes your panes; `/zellij-pi` opens another pi; Zellij's native floating-pane keys do the same from the keyboard. Never try to invoke or emulate those — when the human should look at a pane, name `/zellij-ps` in your reply and let them press the keys.
+
+## When to use
+
+Prefer Pi's `bash` tool for short-lived noninteractive commands. Choose `zellij_run` when a command may be interactive or long-running, needs a PTY, or should remain available in Zellij; the tools stay separate and nothing reroutes `bash` automatically.
+
+New panes start hidden: they land in the invoking Pi tab's floating layer without changing the human's focus, and a closed floating layer stays closed. The human reveals them with `/zellij-ps`. `target=tab` opens a tab instead.
+
+Pass `session` to `zellij_run`, `zellij_send`, `zellij_wait`, and the other tools when work must run in a specific session. Omit it to use the current session, or the auto-created `pi` session when outside Zellij. Parameter defaults live in each tool's own description; this file is about choosing and composing them.
+
+## Which verb?
+
+| Need | Tool / command |
+|---|---|
+| Run one-shot, get output and exit code | `zellij_run` (waited) |
+| Run out of sight; read or interact later | `zellij_run` with `wait="none"` |
+| Drive an interactive app (TUI, REPL) | `zellij_run` `wait="none"` → `zellij_send` → `zellij_wait` (`for="exit"` for TUIs) or `zellij_wait_idle` |
+| "What is on the screen right now?" | `zellij_dump` (viewport) |
+| Capture final result after completion | `zellij_dump` with `full=true` |
+| Tell me when X appears | `zellij_wait` (`for="output"`) |
+| Give me all output as it happens | `subscribe --pane-id X` (raw CLI) |
+| Who is running / did it exit? | `zellij_list` |
+| Poll periodically while it runs | `dump-screen` in a loop (prefer `zellij_wait` / `zellij_wait_idle`) |
+| Clean up | `zellij_close` |
+
+Raw-CLI equivalents: `dump-screen --pane-id X` is the point-in-time snapshot, `--full` adds scrollback, `subscribe` is the stream, and `./scripts/wait-for-pattern.sh X "pattern"` blocks until a pattern appears. `dump-screen` and `subscribe` strip ANSI by default; add `--ansi` to keep styling.
+
+## Shared-pane rules
+
+Your panes are shared objects. Assume the human may have touched one since your last read.
+
+- **Re-read before acting on an earlier dump.** The human can reveal, type into, or resize a pane at any time; `zellij_dump` again before you interpret state or send input.
+- **A human close is terminal, not a hang.** Closing a pane — theirs, or `x` in `/zellij-ps` — unblocks your pending `zellij_wait` as `exited` with `removed_from_layout`. Treat it as the result; don't retry the same pane, re-run in a fresh one if the work is still needed.
+- **Never close a pane you did not create.** The human's shells, editors, and `/zellij-pi` panes are theirs. Always pass an explicit `pane_id` to `zellij_close` — omitting it closes the pane you are running in.
+- **`close_on_exit` is for unattended panes only.** Leave it off when you have told the human to watch the pane.
+- **Don't drive the human's view.** Do not reveal, focus, or hide panes on their behalf; that is `/zellij-ps`'s job.
+- **Hand off explicitly.** When you leave something running, end your message with how to reach it: `/zellij-ps` lists, reveals, and closes your panes — name the command and what the pane is running.
+- **If the human says they interacted with a pane, read it first** (`zellij_dump`) before continuing the task.
+
 ## Session targeting (critical)
 
 | Where the agent runs | Command form |
@@ -17,27 +58,9 @@ Control zellij entirely through subprocess calls — `zellij action <subcommand>
 
 Check sessions: `zellij list-sessions`. Create a headless one: `zellij attach --create-background NAME`.
 
-## Core workflow
+When the `zellij_*` tools are available, use them instead of the raw CLI recipes below; the remaining sections are a reference for manual use and implementation work.
 
-Prefer Pi's `bash` tool for short-lived noninteractive commands. Choose `zellij_run` when a command may be interactive or long-running, needs a PTY, or should remain available in Zellij; the tools remain separate and nothing reroutes `bash` automatically.
-
-Pass `session` to `zellij_run`, `zellij_send`, `zellij_wait`, and the other tools when work must run in a specific session. Omit it to use the current session, or the auto-created `pi` session when outside Zellij.
-
-By default, `zellij_run` pane targets start in the invoking Pi tab's floating layer without changing client focus. `/zellij-ps` lists panes from the current Pi session, including still-running tool calls: use ↑/↓ to select, Enter to reveal and focus, `x` to close, and Esc to cancel. Closing a running pane requires inline confirmation; exited panes close immediately, and successful closes update only the picker list in place. Zellij's native floating-pane controls can also reveal them; `target=tab` keeps its explicit new-tab behavior.
-
-The native background-pane sequence is:
-
-```bash
-PANE_ID=$(zellij action new-pane --floating --no-focus --name worker --cwd "$PWD" -- command)
-# later: reveal all floating panes, or use /zellij-ps to focus this pane
-zellij action show-floating-panes
-```
-
-`--floating` puts the pane in the current tab's floating layer, while `--no-focus` preserves the user's focused pane and tab. A closed floating layer remains closed, so the pane runs out of sight; if that layer was already open, the pane is visible but unfocused. Do not add `--near-current-pane`: closing such a pane can move the client to another tab. For explicit cross-session targeting, omit `--no-focus` because it can misroute pane creation.
-
-When the `zellij_*` tools are available, use them instead of issuing the raw CLI recipes below; the remaining sections are a reference for manual use and implementation work.
-
-## Run a command and wait — blocking (preferred in agent loops)
+## Blocking panes (preferred over polling)
 
 Don't poll exit status or guess how long a command takes — a blocking flag makes the `new-pane` call itself return only when the command finishes:
 
@@ -53,7 +76,19 @@ zellij action dump-screen --pane-id "$PANE_ID" --full   # final output is alread
 
 Without a blocking flag (pane must stay alive), wait by polling `exited` in short sleeps — e.g. `for _ in $(seq 1 24); do ...; sleep 5; done` (~120 s cap) — never a single `sleep 120` then dump. See [references/cli-actions.md](references/cli-actions.md).
 
-## Run a long-running command in a pane (interactive)
+## Background and interactive panes
+
+The native background-pane sequence:
+
+```bash
+PANE_ID=$(zellij action new-pane --floating --no-focus --name worker --cwd "$PWD" -- command)
+# later: reveal all floating panes, or use /zellij-ps to focus this pane
+zellij action show-floating-panes
+```
+
+`--floating` puts the pane in the current tab's floating layer, while `--no-focus` preserves the human's focused pane and tab. A closed floating layer remains closed, so the pane runs out of sight; if that layer was already open, the pane is visible but unfocused. Do not add `--near-current-pane`: closing such a pane can move the client to another tab. For explicit cross-session targeting, omit `--no-focus` because it can misroute pane creation.
+
+Driving one interactively:
 
 ```bash
 # 1. Create a pane (prints the pane id, e.g. terminal_3)
@@ -74,18 +109,6 @@ zellij action close-pane --pane-id "$PANE_ID"
 `new-pane -- <cmd>` runs the command as the pane's process, bypassing the shell (no `$VAR`, globs, pipes).
 
 **Exit codes are only reliable at pane creation** — `new-pane -- <cmd>` records the real `exit_status` in `list-panes --json`. Commands sent interactively via paste/send-keys never get an exit code (pane stays `exit_status: null`). For interactive commands, echo the code into output: `cmd; echo EXIT:$?`. See [references/cli-actions.md](references/cli-actions.md).
-
-## Which read command?
-
-| Need | Command |
-|---|---|
-| "What is on the screen right now?" | `action dump-screen --pane-id X` |
-| Capture final result after completion | `action dump-screen --pane-id X --full` (after blocking pane unblocks) |
-| Give me all output as it happens | `subscribe --pane-id X` |
-| Tell me when X appears | `./scripts/wait-for-pattern.sh X "pattern"` |
-| Periodic polling (every N s) | `dump-screen` in a loop with `sleep` |
-
-`dump-screen` and `subscribe` strip ANSI by default; add `--ansi` to keep styling.
 
 ## Reference
 
