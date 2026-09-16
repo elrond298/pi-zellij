@@ -4,14 +4,20 @@ Reliable [zellij](https://zellij.dev) control for [pi](https://github.com/earend
 
 Requirements: pi, zellij ≥ 0.40.
 
-## What's inside
+## Who does what
 
-| Piece | Location | What it does |
-|---|---|---|
-| **Extension** | `src/` | 7 custom tools that wrap `zellij action`/`subscribe` with reliability built in (real exit codes, timeouts, no sleep-guessing), plus `/zellij-ps` and `/zellij-pi` |
-| **Skill** | `skills/zellij/` | Teaches pi to drive zellij through subprocess calls — no socket or library. Loads whenever pi needs to run something in a pane, read pane output, or manage panes/sessions |
-| Tests | `test/` | Live-session tests for the tools and slash commands |
-| Package manifest | `package.json` | The pi package structure — `pi.extensions` / `pi.skills` point at the extension and skill |
+```
+   you ──prompt──▶ agent ──zellij_* tools──▶ pane (PTY + scrollback)
+    ▲                ▲                         │
+    │                ◀───── reads output ──────┤
+    └── /zellij-ps ─ reveal · type · close ────┘
+```
+
+- **You** talk to Pi in prose, use `/zellij-ps` and `/zellij-pi`, and can touch any pane directly — look at it, type into it, close it.
+- **The agent** runs commands in panes with its `zellij_*` tools, reads their output, and waits for them. It has no access to your slash commands.
+- **The pane** is the shared object: one real terminal both of you can use, and the handoff channel — the agent leaves work there for you, and what you type there is visible to the agent on its next read.
+
+The docs follow the same lines: this file is what you do; the bundled skill (`skills/zellij/SKILL.md`) is what the agent does. Commands and keystrokes are yours, tool parameters are the agent's.
 
 ## Installation
 
@@ -23,72 +29,67 @@ pi install .
 
 Idempotent — re-run after pulling updates. The skill is discovered from this repo directly, so editing `skills/zellij/` takes effect without re-installing; extension code changes need `pi install .` again.
 
-## Extension
+## You drive
 
-### Tools
+**`/zellij-ps`** — picker for panes the agent created in this Pi session. Panes show up as soon as they are created, including while the agent is still running them.
 
-| Tool | Purpose | Reliability notes |
-|---|---|---|
-| `zellij_run` | Run a shell command in a new floating pane **or tab** (`target`) | Default panes start in the invoking Pi tab's floating layer without changing client focus; waited runs stream output through Pi's bash result path; `wait=none` returns immediately; `session` explicitly targets or creates a session |
-| `zellij_dump` | Read pane output (viewport / full scrollback) | ANSI stripped, tail kept when line-capped, blank-run and duplicate lines collapsed |
-| `zellij_send` | Paste text, named keys, or raw bytes into a pane | Bracketed paste multi-line safe; `raw` accepts `\xNN` escape sequences |
-| `zellij_wait` | Wait for a pattern in pane output, or `for: "exit"` for the process to exit | Subscribe-based, scrollback pre-check, kills subscriber, timeout; failed waits are self-diagnosing — pane exit returns early with the exit state, timeouts carry last output as evidence |
-| `zellij_wait_idle` | Wait for a pane to stop changing (`settle` s of silence), then read its output | "Wait for stability" primitive; also returns early if the pane exits; timeouts carry last output |
-| `zellij_list` | List panes/tabs/sessions with id, command, exit status | Pane ids canonicalized to `terminal_N`; internal retry on the server's intermittent empty responses |
-| `zellij_close` | Close a pane (last pane of a tab closes the tab) | — |
-
-All tools auto-resolve the session: explicit `session` (auto-created headless if missing) → current session when running inside zellij → default `pi` session.
-
-Pi keeps its built-in `bash` tool. The model chooses `bash` for short, noninteractive commands and `zellij_run` for long-running, interactive, or user-visible work; the extension does not intercept or reroute bash automatically.
-
-### Background floating panes
-
-For the default `target="pane"`, `zellij_run` starts the command as a native Zellij floating pane:
-
-```bash
-zellij action new-pane --name <temporary-marker> --floating --no-focus --cwd <dir> -- <command>
-```
-
-The procedure is:
-
-1. Snapshot the existing pane IDs, create the pane with a unique temporary title, then resolve and rename its returned pane ID.
-2. `--floating` places it in the invoking Pi tab's floating layer; `--no-focus` leaves the user's current pane and tab focused.
-3. If the floating layer is closed, it stays closed, so the command runs out of sight. If the layer is already open, the new pane is visible but still does not take focus.
-4. Register the pane immediately so `/zellij-ps` can list it while its tool call is still running.
-5. For waited runs, execute through a wrapper that tees output to Pi and records the real exit status. `wait="none"` returns the pane ID immediately.
-6. Reveal it later with `/zellij-ps` (or Zellij's floating-pane toggle); the process already owns a PTY and is ready for interaction.
-
-When `session` explicitly targets another Zellij session, `zellij_run` omits `--no-focus`: Zellij can otherwise route cross-session pane creation incorrectly. `target="tab"` uses the separate explicit new-tab flow.
-
-### Slash commands
-
-`/zellij-ps` opens a picker for panes created by `zellij_run` in the current Pi session, including panes from tool calls that are still running:
 - `↑` / `↓` — select a pane
-- `Enter` — reveal and focus the selected floating pane
-- `x` — close the selected pane; running panes require inline confirmation, while exited panes close immediately
+- `Enter` — reveal and focus it
+- `x` — close it (running panes need inline confirmation; exited panes close immediately)
 - `Esc` — close the picker
 
-After a pane closes, only the picker list is updated; the surrounding Pi interface is not reopened or globally refreshed.
+**`/zellij-pi`** — open another pi in a new pane, or a tab with `--tab`:
 
-`/zellij-pi` (inside a zellij session) opens a new pi in a new pane, or tab with `--tab`:
-- `--fork` — start the new pi as a fork of the current session (`pi --fork <current-session-file>`), so it carries the conversation so far while diverging from here on. Combine with `--cwd`/`--workspace` to fork into another directory or worktree.
+- `--fork` — start it as a fork of the current session (`pi --fork <session-file>`): same conversation so far, diverging from here on. Combine with `--cwd`/`--workspace`.
 - `--cwd <dir>` or a positional `<dir>` — open pi there; relative paths resolve against the current cwd
-- `--workspace [project/]name` — a workspace under `~/.worktrees/<project>/<name>` (the pi-worktree convention); without a name, pick interactively from existing workspaces or create one. Workspace creation mirrors pi-worktree: `git worktree add -b <name>` for git repos, `jj workspace add` for jj repos, `mkdir` + init for bare directories. A bare name uses the repo at the current cwd as the project; pass `project/name` explicitly for another project
+- `--workspace [project/]name` — a workspace under `~/.worktrees/<project>/<name>` (the pi-worktree convention); without a name, pick interactively from existing workspaces or create one. Creation mirrors pi-worktree: `git worktree add -b <name>` for git repos, `jj workspace add` for jj repos, `mkdir` + init for bare directories. A bare name uses the repo at the current cwd as the project
+
+Zellij's own floating-pane controls (`show-floating-panes`, the toggle key) reveal these panes too. Both commands require Pi to run inside a zellij session (`$ZELLIJ` set); otherwise they report an error.
+
+## You and the agent share the pane
+
+- **Panes start hidden.** The agent puts a pane in your current tab's floating layer without changing focus; if that layer is closed, the pane stays out of sight. Nothing pops up in your face.
+- **Revealing is safe.** `/zellij-ps` → `Enter` (or the native floating toggle) shows the pane without disturbing the running process. If the layer was already open, the pane is visible but unfocused.
+- **You can type.** The process owns a real PTY from the start, so it is interactive the moment you reveal it. The agent can read what you typed — but only when it reads, so tell it when you are done.
+- **Closing is a signal, not just cleanup.** It kills the process *and* unblocks the agent's pending wait immediately with an exited result, instead of leaving it hanging. A finished pane is not closed automatically, so its scrollback stays readable afterwards.
+- **Handoffs need no setup.** Agent → you: "watch it with `/zellij-ps`". You → agent: "I typed the password into the pane, continue".
+- **The agent never takes over your screen.** It does not reveal, focus, or hide panes for you.
+
+When the agent targets another zellij session explicitly, that session's native focus behavior applies. `target="tab"` opens a tab instead of a floating pane.
+
+## What to ask for
+
+| You want | Say | What you get |
+|---|---|---|
+| Result back in Pi | "run the tests" | the agent runs and waits, then reports output and exit status (if your floating layer is closed, you never see a pane) |
+| To watch it live | "run it in a pane I can watch" | a pane you reveal with `/zellij-ps` → `Enter` |
+| To drive it yourself | "start X in a pane, I'll answer the prompts" | a pane you type into; the agent can read the result afterwards |
+| To keep working meanwhile | "start X in the background" | a hidden pane that keeps running while you and the agent do something else |
+| To stop something | "stop it", or `x` in `/zellij-ps` | the pane closes; if the agent was waiting on it, it unblocks right away |
+
+## What the agent can do
+
+| Capability | Tool |
+|---|---|
+| Run a command in a new pane or tab | `zellij_run` |
+| Read pane output (viewport, or full scrollback) | `zellij_dump` |
+| Paste text, send keys, or write raw bytes into a pane | `zellij_send` |
+| Wait for a pattern in the output, or for the process to exit | `zellij_wait` |
+| Wait for a pane to stop changing, then read it | `zellij_wait_idle` |
+| List panes/tabs/sessions with ids, commands, exit status | `zellij_list` |
+| Close a pane | `zellij_close` |
+
+The agent chooses between these and Pi's built-in `bash`: `bash` for short, noninteractive commands, a pane for anything interactive, long-running, or worth watching. Nothing reroutes `bash` automatically. Parameters live in each tool's own description (`src/tools.ts`), not here.
 
 ## Skill
 
-The bundled `zellij` skill is a CLI reference for controlling zellij from a shell:
-
-- **Session targeting** — `zellij action ...` inside a session, `--session NAME` outside or cross-session
-- **Core workflow** — blocking `new-pane --block-until-exit -- cmd` for one-shot commands, `paste`/`send-keys` for interactive ones, exit-code capture via `list-panes --json`
-- **Which read command?** — a decision table: `dump-screen` for "what's on screen now", `subscribe` for streaming and pattern waits
-- **Reference** — `references/cli-actions.md` (full command patterns and gotchas) and `scripts/wait-for-pattern.sh` (block until a pattern appears)
+The bundled `zellij` skill is the agent's manual: session targeting, the tool-choice table, blocking `new-pane --block-until-exit -- cmd` for one-shot commands, `paste`/`send-keys` for interactive ones, and exit-code capture via `list-panes --json`. It doubles as a plain CLI reference if you script zellij yourself: `skills/zellij/SKILL.md`, `skills/zellij/references/cli-actions.md`, `skills/zellij/scripts/wait-for-pattern.sh`.
 
 ## Development
 
 ```bash
 npm install                                             # once, for a fresh clone
-node --experimental-strip-types test/harness.ts        # tools, live session (fresh per run)
+node --experimental-strip-types test/harness.ts         # tools, live session (fresh per run)
 node --experimental-strip-types test/wait-test.ts       # idle deduplication (no live session needed)
 node --experimental-strip-types test/run-test.ts        # streamed run lifecycle + explicit sessions
 node --experimental-strip-types test/command-test.ts    # slash commands — run INSIDE a zellij pane
@@ -100,3 +101,5 @@ The repo is jj-managed (colocated git). Commit, then re-install:
 jj commit -m "message" <paths>
 pi install .
 ```
+
+Layout: `src/` is the extension (the tool descriptions there are the canonical parameter reference), `skills/zellij/` the skill, `test/` live-session tests, `package.json` the pi package manifest (`pi.extensions` / `pi.skills`).
