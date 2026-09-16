@@ -7,10 +7,16 @@ Requirements: pi, zellij ≥ 0.40.
 ## Who does what
 
 ```
-   you ──prompt──▶ agent ──zellij_* tools──▶ pane (PTY + scrollback)
-    ▲                ▲                         │
-    │                ◀───── reads output ──────┤
-    └── /zellij-ps ─ reveal · type · close ────┘
+     you ────── prompt ──────▶ agent
+      │                            │
+      │ /zellij-ps · typing        │ zellij_* tools
+      │ reveal · type · close      │ run · read · wait · close
+      └──────────┐        ┌────────┘
+                 ▼        ▼
+      ┌────────────────────────────┐
+      │      the shared pane       │
+      │ process + PTY + scrollback │
+      └────────────────────────────┘
 ```
 
 - **You** talk to Pi in prose, use `/zellij-ps` and `/zellij-pi`, and can touch any pane directly — look at it, type into it, close it.
