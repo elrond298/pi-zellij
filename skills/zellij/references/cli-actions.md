@@ -2,16 +2,9 @@
 
 Full reference for `zellij action`, `zellij subscribe`, and session management (v0.40+). All commands target the current session unless `--session NAME` is given.
 
-## Create / close
+This is the manual CLI layer — for a human working in a shell, or for a script. Agents should use the `zellij_*` tools instead; see [SKILL.md](../SKILL.md).
 
-| Action | Notes |
-|---|---|
-| `action new-pane [--name N] [--cwd DIR] [--floating] [--direction right\|down] [-- <cmd>...]` | Prints pane id (`terminal_3`). `-- <cmd>` runs cmd as the pane process (no shell). |
-| `action new-tab [--name N]` | Prints tab id. |
-| `action close-pane [--pane-id X]` | Without `--pane-id`, closes the focused pane. |
-| `action close-tab` | Closes the current tab. |
-| `action edit <file>` | Opens file in a new pane with `$EDITOR`; prints pane id. |
-
+## Patterns
 
 ### Start hidden, reveal later
 
@@ -27,6 +20,16 @@ zellij action focus-pane-id "$PANE_ID"
 ```
 
 This pane has a PTY from the start, so it remains interactive when revealed. If the floating layer was already open, the pane is visible immediately but remains unfocused. Avoid combining `--near-current-pane` with this pattern: closing the pane can move the client to another tab. When targeting another session with `zellij --session NAME`, omit `--no-focus`; it can cause cross-session creation to land in the wrong session.
+
+## Create / close
+
+| Action | Notes |
+|---|---|
+| `action new-pane [--name N] [--cwd DIR] [--floating] [--direction right\|down] [-- <cmd>...]` | Prints pane id (`terminal_3`). `-- <cmd>` runs cmd as the pane process (no shell). |
+| `action new-tab [--name N]` | Prints tab id. |
+| `action close-pane [--pane-id X]` | Without `--pane-id`, closes the focused pane. |
+| `action close-tab` | Closes the current tab. |
+| `action edit <file>` | Opens file in a new pane with `$EDITOR`; prints pane id. |
 
 ## Send input
 
