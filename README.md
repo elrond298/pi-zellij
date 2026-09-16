@@ -101,10 +101,10 @@ node --experimental-strip-types test/run-test.ts        # streamed run lifecycle
 node --experimental-strip-types test/command-test.ts    # slash commands — run INSIDE a zellij pane
 ```
 
-The repo is jj-managed (colocated git). Commit, then re-install:
+Commit, then re-install:
 
 ```bash
-jj commit -m "message" <paths>
+git add -A && git commit -m "message"
 pi install .
 ```
 
