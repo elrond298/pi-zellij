@@ -4,6 +4,7 @@
  */
 import { spawn } from "node:child_process";
 import { paneExitState } from "./cli.ts";
+import { dumpPane } from "./output.ts";
 
 export type WaitOutcome = {
   status: "matched" | "idle" | "timeout" | "exited";
@@ -211,5 +212,83 @@ export async function waitForIdle(
       }
     });
   });
+}
+
+export type PaneExitOutcome = {
+  exited: boolean;
+  exit_status: number | null;
+  removed: boolean;
+  elapsed_ms: number;
+};
+
+/**
+ * Poll until the pane's process exits, the pane disappears from the layout,
+ * or the timeout hits. Shared by zellij_wait for=exit and zellij_send wait_for=exit.
+ */
+export async function waitForPaneExit(
+  paneId: string,
+  timeoutMs: number,
+  sessionArgs: string[],
+  signal?: AbortSignal,
+): Promise<PaneExitOutcome> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const state = await paneExitState(sessionArgs, paneId);
+    if (state?.exited) {
+      return { exited: true, exit_status: state.exit_status, removed: state.removed, elapsed_ms: Date.now() - started };
+    }
+    if (signal?.aborted) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return { exited: false, exit_status: null, removed: false, elapsed_ms: Date.now() - started };
+}
+
+export type NewPatternOutcome =
+  | { status: "matched"; line: string; elapsedMs: number }
+  | { status: "timeout"; elapsedMs: number }
+  | { status: "exited"; elapsedMs: number; exit_status: number | null; removed: boolean };
+
+/**
+ * Wait for a pattern in output that is NEW since `baseline` — a full dump captured
+ * just before the keystrokes were sent. Appended output keeps the baseline as a
+ * prefix, so the delta is the new text; a rewritten screen (TUI, alt-screen) loses
+ * the prefix and the whole screen is then treated as new. Polls full dumps and
+ * also ends when the pane's process exits (after giving that iteration's dump a
+ * chance to match final output).
+ */
+export async function waitForNewPattern(
+  paneId: string,
+  pattern: string,
+  regex: boolean,
+  timeoutMs: number,
+  sessionArgs: string[],
+  baseline: string,
+  signal?: AbortSignal,
+): Promise<NewPatternOutcome> {
+  const started = Date.now();
+  const rx = regex ? new RegExp(pattern) : null;
+  const matchNew = (text: string) => {
+    const delta = text.startsWith(baseline) ? text.slice(baseline.length) : text;
+    return delta.split("\n").find((line) => (rx ? rx.test(line) : line.includes(pattern)));
+  };
+  while (Date.now() - started < timeoutMs) {
+    if (signal?.aborted) return { status: "timeout", elapsedMs: Date.now() - started };
+    let text: string | null = null;
+    try {
+      text = (await dumpPane(paneId, true, 5000, true, sessionArgs, signal)).text;
+    } catch {
+      // pane may have just been removed from the layout
+    }
+    if (text !== null) {
+      const line = matchNew(text);
+      if (line !== undefined) return { status: "matched", line, elapsedMs: Date.now() - started };
+    }
+    const state = await paneExitState(sessionArgs, paneId);
+    if (state?.exited) {
+      return { status: "exited", elapsedMs: Date.now() - started, exit_status: state.exit_status, removed: state.removed };
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return { status: "timeout", elapsedMs: Date.now() - started };
 }
 

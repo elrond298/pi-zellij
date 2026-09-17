@@ -80,7 +80,7 @@ When the agent targets another zellij session explicitly, that session's native 
 |---|---|
 | Run a command in a new pane or tab | `zellij_run` |
 | Read pane output (viewport, or full scrollback) | `zellij_dump` |
-| Paste text, send keys, or write raw bytes into a pane | `zellij_send` |
+| Paste text, send keys, or write raw bytes into a pane — optionally blocking until new output matches, the pane goes idle, or it exits | `zellij_send` |
 | Wait for a pattern in the output, or for the process to exit | `zellij_wait` |
 | Wait for a pane to stop changing, then read it | `zellij_wait_idle` |
 | List panes/tabs/sessions with ids, commands, exit status | `zellij_list` |
@@ -100,6 +100,7 @@ node --experimental-strip-types test/harness.ts         # tools, live session (f
 node --experimental-strip-types test/wait-test.ts       # idle deduplication (no live session needed)
 node --experimental-strip-types test/run-test.ts        # streamed run lifecycle + explicit sessions
 node --experimental-strip-types test/notify-test.ts      # background exit signals + suppression
+node --experimental-strip-types test/send-test.ts       # send + wait (pattern/idle/exit) in one call
 node --experimental-strip-types test/command-test.ts    # slash commands — run INSIDE a zellij pane
 ```
 

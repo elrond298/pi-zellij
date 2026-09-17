@@ -4,9 +4,9 @@
  */
 import { Type } from "typebox";
 import { createBashTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { runZellij, listPanes, listSessions, resolveSession, normalizePaneId, findPane, paneExitState, type PaneInfo } from "./cli.ts";
+import { runZellij, listPanes, listSessions, resolveSession, normalizePaneId, findPane, paneExitState } from "./cli.ts";
 import { createCommandPane, createZellijBashOperations, type RunLocation } from "./run.ts";
-import { waitForPattern, waitForIdle } from "./wait.ts";
+import { waitForPattern, waitForIdle, waitForPaneExit, waitForNewPattern } from "./wait.ts";
 import { dumpPane, capNote, showLine } from "./output.ts";
 
 /**
@@ -240,10 +240,12 @@ export function registerTools(pi: ExtensionAPI) {
     label: "Zellij: Send Input",
     description:
       "Send input to a zellij pane: paste text (bracketed paste — multi-line safe) and/or named keys. " +
-      "Use for interactive commands, answering prompts, or driving a REPL in a pane.",
+      "Use for interactive commands, answering prompts, or driving a REPL in a pane. " +
+      "With wait_for, block after the send until a pattern appears in NEW output, the pane goes idle, or the process exits — replacing the follow-up zellij_wait / zellij_wait_idle call.",
     promptSnippet: "Send text or keys to a zellij pane (paste + Enter)",
     promptGuidelines: [
       "Use zellij_send — never raw `zellij action paste` / `zellij action send-keys` — for pane input; it combines text + keys and handles session targeting.",
+      "When you would send and then immediately wait on the result, use zellij_send's wait_for instead of a follow-up zellij_wait call: pattern matches only new output from this send, so a prompt already on screen cannot false-match.",
     ],
     parameters: Type.Object({
       pane_id: Type.Optional(Type.String({ description: "Pane id (e.g. terminal_3 or 3). Default: the pane this agent runs in." })),
@@ -260,6 +262,18 @@ export function registerTools(pi: ExtensionAPI) {
       press_enter: Type.Optional(
         Type.Boolean({ description: "Send Enter after the text (default true when text is given)", default: true }),
       ),
+      wait_for: Type.Optional(
+        Type.String({
+          description:
+            "After sending, block until: pattern — `pattern` appears in NEW output produced by this send (text already on screen never matches); " +
+            "idle — the pane goes quiet for `settle` seconds; exit — the pane's process exits. Combines send + wait in one call; timeouts carry last output as evidence.",
+          enum: ["pattern", "idle", "exit"],
+        }),
+      ),
+      pattern: Type.Optional(Type.String({ description: "Pattern to wait for (required when wait_for=pattern)" })),
+      regex: Type.Optional(Type.Boolean({ description: "Treat pattern as a regex (default false)", default: false })),
+      settle: Type.Optional(Type.Number({ description: "Seconds of silence that counts as idle (wait_for=idle, default 2)", default: 2 })),
+      timeout: Type.Optional(Type.Number({ description: "Max seconds to wait after sending (default 60)", default: 60 })),
       session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
     }),
     async execute(_toolCallId, params, signal) {
@@ -267,6 +281,10 @@ export function registerTools(pi: ExtensionAPI) {
       const paneId = normalizePaneId(params.pane_id);
       // zellij silently ignores paste/send-keys to a nonexistent pane (exit 0) — verify first
       findPane(await listPanes(sessionArgs), paneId);
+      if (params.wait_for === "pattern" && !params.pattern) throw new Error("pattern is required when wait_for=pattern");
+      // Pattern waits match only NEW output: snapshot the pane before the keystrokes so
+      // text already on screen (e.g. a prompt from the previous command) cannot match.
+      const baseline = params.wait_for === "pattern" ? (await dumpPane(paneId, true, 5000, true, sessionArgs, signal)).text : "";
       const keys = [...(params.keys ?? [])];
       if (params.text && params.press_enter !== false) keys.unshift("Enter");
 
@@ -292,13 +310,75 @@ export function registerTools(pi: ExtensionAPI) {
         : params.raw
           ? ` raw "${params.raw}"`
           : "";
+      const sentText = `Sent to ${paneId}:${summary}${keys.length ? ` + keys [${keys.join(", ")}]` : ""}`;
+      if (params.wait_for) {
+        const timeoutMs = (params.timeout ?? 60) * 1000;
+        // Best-effort evidence: the pane may be gone right after an exit.
+        const evidence = async (lines: number) => {
+          try {
+            return (await dumpPane(paneId, true, lines, true, sessionArgs, signal)).text;
+          } catch {
+            return null;
+          }
+        };
+        if (params.wait_for === "pattern") {
+          const res = await waitForNewPattern(paneId, params.pattern!, params.regex === true, timeoutMs, sessionArgs, baseline, signal);
+          if (res.status === "matched") {
+            const ev = await evidence(30);
+            return {
+              content: [{ type: "text", text: `${sentText} Matched new output in ${(res.elapsedMs / 1000).toFixed(1)}s: ${showLine(res.line.trim())}` + (ev ? `\n\nOutput:\n${ev}` : "") }],
+              details: { pane_id: paneId, wait_for: "pattern", matched: true, line: res.line.trim(), elapsed_ms: res.elapsedMs, evidence: ev },
+            };
+          }
+          if (res.status === "exited") {
+            markExitKnown(paneId);
+            const ev = res.removed ? null : await evidence(30);
+            return {
+              content: [{ type: "text", text: `${sentText} Pattern not in new output — pane exited` + (res.exit_status !== null ? ` with status ${res.exit_status}` : " (removed from layout)") + ` after ${(res.elapsedMs / 1000).toFixed(1)}s.` + (ev ? `\n\nLast output:\n${ev}` : "") }],
+              details: { pane_id: paneId, wait_for: "pattern", matched: false, terminal: "exited", exit_status: res.exit_status, removed_from_layout: res.removed, elapsed_ms: res.elapsedMs, evidence: ev },
+            };
+          }
+          const ev = await evidence(20);
+          return {
+            content: [{ type: "text", text: `${sentText} Pattern not in new output within ${params.timeout ?? 60}s (pane still running).` + (ev ? `\n\nLast output:\n${ev}` : "") }],
+            details: { pane_id: paneId, wait_for: "pattern", matched: false, timed_out: true, elapsed_ms: res.elapsedMs, evidence: ev },
+          };
+        }
+        if (params.wait_for === "idle") {
+          const res = await waitForIdle(paneId, (params.settle ?? 2) * 1000, timeoutMs, sessionArgs, signal);
+          if (res.status === "exited") markExitKnown(paneId);
+          if (res.status === "idle") {
+            const ev = await evidence(100);
+            return {
+              content: [{ type: "text", text: `${sentText} Pane quiet for ${params.settle ?? 2}s (idle after ${(res.elapsedMs / 1000).toFixed(1)}s).` + (ev ? `\n\nCurrent output:\n${ev}` : "") }],
+              details: { pane_id: paneId, wait_for: "idle", idle: true, elapsed_ms: res.elapsedMs, evidence: ev },
+            };
+          }
+          if (res.status === "exited") {
+            const ev = res.removed ? null : await evidence(100);
+            return {
+              content: [{ type: "text", text: `${sentText} Pane exited while waiting for idle` + (res.exit_status !== null ? ` with status ${res.exit_status}` : " (removed from layout)") + ` after ${(res.elapsedMs / 1000).toFixed(1)}s.` + (ev ? `\n\nLast output:\n${ev}` : "") }],
+              details: { pane_id: paneId, wait_for: "idle", idle: false, terminal: "exited", exit_status: res.exit_status, removed_from_layout: res.removed, elapsed_ms: res.elapsedMs, evidence: ev },
+            };
+          }
+          const ev = await evidence(100);
+          return {
+            content: [{ type: "text", text: `${sentText} Pane never went quiet within ${params.timeout ?? 60}s. Last output:\n${ev ?? ""}` }],
+            details: { pane_id: paneId, wait_for: "idle", idle: false, timed_out: true, elapsed_ms: res.elapsedMs, evidence: ev },
+          };
+        }
+        const res = await waitForPaneExit(paneId, timeoutMs, sessionArgs, signal);
+        if (res.exited) markExitKnown(paneId);
+        const outcome = res.exited
+          ? `Pane ${paneId} exited` + (res.exit_status !== null ? ` with status ${res.exit_status}` : " (removed from layout)") + ` after ${(res.elapsed_ms / 1000).toFixed(1)}s.`
+          : `Pane ${paneId} still running after ${params.timeout ?? 60}s (timeout).`;
+        return {
+          content: [{ type: "text", text: `${sentText} ${outcome}` }],
+          details: { pane_id: paneId, wait_for: "exit", exited: res.exited, exit_status: res.exit_status, removed_from_layout: res.removed, timed_out: !res.exited, elapsed_ms: res.elapsed_ms },
+        };
+      }
       return {
-        content: [
-          {
-            type: "text",
-            text: `Sent to ${paneId}:${summary}${keys.length ? ` + keys [${keys.join(", ")}]` : ""}`,
-          },
-        ],
+        content: [{ type: "text", text: sentText }],
         details: { pane_id: paneId },
       };
     },
@@ -338,26 +418,8 @@ export function registerTools(pi: ExtensionAPI) {
       if (params.for === "exit") {
         // Wait for the pane's process to exit (or the pane to disappear — interactive
         // shells are removed from the layout when they exit, which is itself the signal).
-        const started = Date.now();
-        let pane: PaneInfo | undefined;
-        let gone = false;
-        while (Date.now() - started < timeoutMs) {
-          try {
-            const panes = await listPanes(sessionArgs);
-            try {
-              pane = findPane(panes, params.pane_id);
-            } catch {
-              gone = true; // pane removed from layout = it exited
-              break;
-            }
-            if (pane.exited) break;
-          } catch {
-            // transient list-panes failure — keep waiting
-          }
-          if (signal?.aborted) break;
-          await new Promise((r) => setTimeout(r, 500));
-        }
-        const exited = gone || (pane?.exited ?? false);
+        const res = await waitForPaneExit(params.pane_id, timeoutMs, sessionArgs, signal);
+        const exited = res.exited;
         if (exited) markExitKnown(params.pane_id);
         // Evidence on failure: a timed-out exit-wait carries the pane's last output.
         let evidence: string | null = null;
@@ -366,7 +428,7 @@ export function registerTools(pi: ExtensionAPI) {
           evidence = ev.text;
         }
         const text = exited
-          ? `Pane ${params.pane_id} exited` + ((pane?.exit_status ?? null) !== null ? ` with status ${pane?.exit_status}` : " (removed from layout)") + ` after ${((Date.now() - started) / 1000).toFixed(1)}s.`
+          ? `Pane ${params.pane_id} exited` + (res.exit_status !== null ? ` with status ${res.exit_status}` : " (removed from layout)") + ` after ${(res.elapsed_ms / 1000).toFixed(1)}s.`
           : `Pane ${params.pane_id} still running after ${params.timeout ?? 300}s (timeout).` +
             (evidence ? `\n\nLast output:\n${evidence}` : "");
         return {
@@ -374,9 +436,9 @@ export function registerTools(pi: ExtensionAPI) {
           details: {
             pane_id: params.pane_id,
             exited,
-            exit_status: pane?.exit_status ?? null,
-            removed_from_layout: gone,
-            elapsed_ms: Date.now() - started,
+            exit_status: res.exit_status,
+            removed_from_layout: res.removed,
+            elapsed_ms: res.elapsed_ms,
             evidence,
           },
         };

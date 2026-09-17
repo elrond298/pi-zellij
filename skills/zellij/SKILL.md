@@ -27,7 +27,7 @@ Pass `session` to `zellij_run`, `zellij_send`, `zellij_wait`, and the other tool
 | Run one-shot, get output and exit code | `zellij_run` (waited) |
 | Run out of sight; read or interact later | `zellij_run` with `wait="none"` |
 | Fire-and-forget; get signaled when it exits | `zellij_run` with `wait="none"` + `notify_on_exit=true` — keep working; exit status and last output arrive as a follow-up message that wakes you. Skip it when you already learned the exit from `zellij_wait`/`zellij_close` — you are never told twice |
-| Drive an interactive app (TUI, REPL) | `zellij_run` `wait="none"` → `zellij_send` → `zellij_wait` (`for="exit"` for TUIs) or `zellij_wait_idle` |
+| Drive an interactive app (TUI, REPL) | `zellij_run` `wait="none"` → `zellij_send` → `zellij_wait` (`for="exit"` for TUIs) or `zellij_wait_idle`. Send and the follow-up wait combine into one call: `zellij_send` with `wait_for="pattern"|"idle"|"exit"` — pattern matches only output new since the send, so a prompt already on screen never false-matches |
 | "What is on the screen right now?" | `zellij_dump` (viewport) |
 | Capture final result after completion | `zellij_dump` with `full=true` |
 | Tell me when X appears | `zellij_wait` (`for="output"`) |
