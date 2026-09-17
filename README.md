@@ -71,6 +71,7 @@ When the agent targets another zellij session explicitly, that session's native 
 | To watch it live | "run it in a pane I can watch" | a pane you reveal with `/zellij-ps` → `Enter` |
 | To drive it yourself | "start X in a pane, I'll answer the prompts" | a pane you type into; the agent can read the result afterwards |
 | To keep working meanwhile | "start X in the background" | a hidden pane that keeps running while you and the agent do something else |
+| To be told when a background job finishes | "run X in the background and tell me when it's done" | the agent starts it detached and is woken with the exit status and last output when it exits — it can keep working (or you can walk away) in the meantime |
 | To stop something | "stop it", or `x` in `/zellij-ps` | the pane closes; if the agent was waiting on it, it unblocks right away |
 
 ## What the agent can do
@@ -98,6 +99,7 @@ npm install                                             # once, for a fresh clon
 node --experimental-strip-types test/harness.ts         # tools, live session (fresh per run)
 node --experimental-strip-types test/wait-test.ts       # idle deduplication (no live session needed)
 node --experimental-strip-types test/run-test.ts        # streamed run lifecycle + explicit sessions
+node --experimental-strip-types test/notify-test.ts      # background exit signals + suppression
 node --experimental-strip-types test/command-test.ts    # slash commands — run INSIDE a zellij pane
 ```
 

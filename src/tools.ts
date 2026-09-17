@@ -4,10 +4,81 @@
  */
 import { Type } from "typebox";
 import { createBashTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { runZellij, listPanes, listSessions, resolveSession, normalizePaneId, findPane, type PaneInfo } from "./cli.ts";
+import { runZellij, listPanes, listSessions, resolveSession, normalizePaneId, findPane, paneExitState, type PaneInfo } from "./cli.ts";
 import { createCommandPane, createZellijBashOperations, type RunLocation } from "./run.ts";
 import { waitForPattern, waitForIdle } from "./wait.ts";
 import { dumpPane, capNote, showLine } from "./output.ts";
+
+/**
+ * Background exit watches: zellij_run wait=none notify_on_exit=true asks for a
+ * completion signal. A poller watches the pane and, when its process exits,
+ * pi.sendMessage(..., {deliverAs: "followUp", triggerTurn: true}) wakes the agent
+ * with the exit status and last output. Tools that already report the exit
+ * themselves (zellij_wait, zellij_close) mark it known so the agent is never
+ * told twice about the same pane.
+ */
+type ExitWatch = { consumed: boolean };
+const exitWatches = new Map<string, ExitWatch>();
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The exit was already reported to the agent through a tool result — suppress its notification. */
+function markExitKnown(paneId: string) {
+  const watch = exitWatches.get(paneId.replace(/^terminal_/, ""));
+  if (watch) watch.consumed = true;
+}
+
+function watchPaneExit(
+  pi: ExtensionAPI,
+  opts: { sessionArgs: string[]; paneId: string; command: string; name?: string },
+) {
+  const watch: ExitWatch = { consumed: false };
+  const key = opts.paneId.replace(/^terminal_/, "");
+  exitWatches.set(key, watch);
+  const started = Date.now();
+  void (async () => {
+    let misses = 0;
+    let state: Awaited<ReturnType<typeof paneExitState>> = null;
+    while (true) {
+      await delay(1000);
+      state = await paneExitState(opts.sessionArgs, opts.paneId);
+      if (state === null) {
+        if (++misses >= 10) break; // session unreachable for ~10 polls — give up silently
+        continue;
+      }
+      misses = 0;
+      if (state.exited) {
+        // Hold just past zellij_wait's 500ms poll so a concurrent active wait
+        // can report the exit first and mark it consumed.
+        await delay(500);
+        break;
+      }
+    }
+    exitWatches.delete(key);
+    if (watch.consumed || !state?.exited) return;
+    let evidence = "";
+    if (!state.removed) {
+      try {
+        evidence = (await dumpPane(opts.paneId, true, 15, true, opts.sessionArgs)).text;
+      } catch {
+        // pane vanished between detection and dump — status alone still signals
+      }
+    }
+    const label = opts.name ? `${opts.paneId} (${opts.name})` : opts.paneId;
+    const status = state.exit_status !== null ? `with status ${state.exit_status}` : "(pane removed from layout; no exit status or output)";
+    pi.sendMessage(
+      {
+        customType: "zellij-run-exit",
+        content:
+          `Background command in pane ${label} exited ${status} after ${((Date.now() - started) / 1000).toFixed(1)}s.\n` +
+          `Command: ${opts.command}` +
+          (evidence ? `\n\nLast output:\n${evidence}` : ""),
+        display: true,
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+  })();
+}
 
 export function registerTools(pi: ExtensionAPI) {
   pi.registerTool({
@@ -15,7 +86,7 @@ export function registerTools(pi: ExtensionAPI) {
     label: "Zellij: Run Command",
     description:
       "Run a command in a new Zellij floating pane or tab. Use for interactive, long-running, or user-visible commands; use bash for short-lived noninteractive commands. " +
-      "Waited commands stream output into Pi and return bash-compatible output and errors. Detached commands return the pane id immediately. " +
+      "Waited commands stream output and return bash-compatible output and errors. Detached commands return the pane id immediately; with notify_on_exit=true the agent is signaled when the command exits. " +
       "By default, a pane starts in the invoking Pi tab's floating layer without changing client focus. An explicit session is auto-created when absent.",
 
     promptSnippet: "Run an interactive, long-running, or user-visible command in a Zellij floating pane or tab",
@@ -23,6 +94,7 @@ export function registerTools(pi: ExtensionAPI) {
       "Use zellij_run only for interactive, long-running, or user-visible terminal work. Use bash for short-lived noninteractive commands.",
       "For interactive apps (TUIs, REPLs, editors), spawn with zellij_run wait=none and drive it with zellij_send / zellij_wait / zellij_close.",
       "For waited zellij_run commands, rely on its streamed result and exit status instead of calling zellij_dump afterward.",
+      "For fire-and-forget background work, spawn with zellij_run wait=none notify_on_exit=true and continue other work — exit status and last output arrive as a follow-up message when the command finishes. Use zellij_wait for=exit when you need the result before continuing.",
     ],
     parameters: Type.Object({
       command: Type.String({ description: "Command to run (shell syntax allowed)" }),
@@ -35,6 +107,14 @@ export function registerTools(pi: ExtensionAPI) {
       ),
       close_on_exit: Type.Optional(
         Type.Boolean({ description: "Close a completed pane after result capture; detached commands use Zellij's native close-on-exit.", default: false }),
+      ),
+      notify_on_exit: Type.Optional(
+        Type.Boolean({
+          description:
+            "wait=none only: signal the agent when the command exits — exit status and last output arrive as a follow-up message that wakes the agent for a new turn. " +
+            "Use for fire-and-forget background work; the agent can also actively wait with zellij_wait for=exit. Requires close_on_exit=false so finished output stays readable. Default false.",
+          default: false,
+        }),
       ),
       name: Type.Optional(Type.String({ description: "Optional pane (or tab, when target=tab) name" })),
       target: Type.Optional(
@@ -64,6 +144,9 @@ export function registerTools(pi: ExtensionAPI) {
           closeOnExit: params.close_on_exit === true,
           signal,
         });
+        if (params.notify_on_exit === true) {
+          watchPaneExit(pi, { sessionArgs, paneId: created.paneId, command: params.command, name: params.name });
+        }
         const where = targetTab ? `tab ${created.tabId}` : `pane ${created.paneId}`;
         return {
           content: [{ type: "text", text: `Started in ${where}.` }],
@@ -73,6 +156,7 @@ export function registerTools(pi: ExtensionAPI) {
             session: params.session ?? null,
             waited: false,
             close_on_exit: params.close_on_exit === true,
+            notify_on_exit: params.notify_on_exit === true,
           },
         };
       }
@@ -274,6 +358,7 @@ export function registerTools(pi: ExtensionAPI) {
           await new Promise((r) => setTimeout(r, 500));
         }
         const exited = gone || (pane?.exited ?? false);
+        if (exited) markExitKnown(params.pane_id);
         // Evidence on failure: a timed-out exit-wait carries the pane's last output.
         let evidence: string | null = null;
         if (!exited) {
@@ -281,7 +366,7 @@ export function registerTools(pi: ExtensionAPI) {
           evidence = ev.text;
         }
         const text = exited
-          ? `Pane ${params.pane_id} exited` + (pane?.exit_status !== null ? ` with status ${pane?.exit_status}` : " (removed from layout)") + ` after ${((Date.now() - started) / 1000).toFixed(1)}s.`
+          ? `Pane ${params.pane_id} exited` + ((pane?.exit_status ?? null) !== null ? ` with status ${pane?.exit_status}` : " (removed from layout)") + ` after ${((Date.now() - started) / 1000).toFixed(1)}s.`
           : `Pane ${params.pane_id} still running after ${params.timeout ?? 300}s (timeout).` +
             (evidence ? `\n\nLast output:\n${evidence}` : "");
         return {
@@ -321,6 +406,7 @@ export function registerTools(pi: ExtensionAPI) {
         signal,
       );
       if (res.status === "exited") {
+        markExitKnown(params.pane_id);
         // Terminal state reached before the pattern: return it, not a timeout.
         return {
           content: [
@@ -401,6 +487,7 @@ export function registerTools(pi: ExtensionAPI) {
         };
       }
       if (res.status === "exited") {
+        markExitKnown(params.pane_id);
         return {
           content: [
             {
@@ -509,6 +596,7 @@ export function registerTools(pi: ExtensionAPI) {
       const paneId = normalizePaneId(params.pane_id);
       const { stdout, code } = await runZellij([...sessionArgs, "action", "close-pane", "--pane-id", paneId], { signal });
       if (code !== 0) throw new Error(`close-pane failed: ${stdout}`);
+      markExitKnown(paneId);
       return { content: [{ type: "text", text: `Closed pane ${paneId}.` }], details: { pane_id: paneId } };
     },
   });
