@@ -125,13 +125,14 @@ export function registerTools(pi: ExtensionAPI) {
         }),
       ),
       cwd: Type.Optional(Type.String({ description: "Working directory; defaults to Pi's current working directory" })),
-      session: Type.Optional(Type.String({ description: "Zellij session name. Explicit names are auto-created; otherwise use the current session or default 'pi'." })),
+      session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
       timeout: Type.Optional(
         Type.Number({ description: "Maximum seconds to wait (default 600). Timeout terminates the pane and reports partial output.", default: 600 }),
       ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const sessionArgs = await resolveSession(params.session);
+      const sessionLabel = sessionArgs[1] ?? "current";
       const cwd = params.cwd ?? ctx?.cwd ?? process.cwd();
       const targetTab = params.target === "tab";
 
@@ -149,11 +150,11 @@ export function registerTools(pi: ExtensionAPI) {
         }
         const where = targetTab ? `tab ${created.tabId}` : `pane ${created.paneId}`;
         return {
-          content: [{ type: "text", text: `Started in ${where}.` }],
+          content: [{ type: "text", text: `Started in ${where} (session ${sessionLabel}).` }],
           details: {
             pane_id: created.paneId,
             tab_id: created.tabId,
-            session: params.session ?? null,
+            session: sessionLabel,
             waited: false,
             close_on_exit: params.close_on_exit === true,
             notify_on_exit: params.notify_on_exit === true,
@@ -187,7 +188,7 @@ export function registerTools(pi: ExtensionAPI) {
             ...result.details,
             pane_id: location.paneId,
             tab_id: location.tabId,
-            session: params.session ?? null,
+            session: sessionLabel,
             waited: true,
             exited: true,
             exit_status: location.exitStatus,
@@ -196,7 +197,7 @@ export function registerTools(pi: ExtensionAPI) {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const where = location.paneId ? `\n\nZellij pane: ${location.paneId}${params.session ? ` (session ${params.session})` : ""}` : "";
+        const where = location.paneId ? `\n\nZellij pane: ${location.paneId} (session ${sessionLabel})` : "";
         throw new Error(message + where);
       }
     },
@@ -221,7 +222,7 @@ export function registerTools(pi: ExtensionAPI) {
       tail: Type.Optional(
         Type.Boolean({ description: "When output exceeds max_lines, return the last lines instead of the first (default true)", default: true }),
       ),
-      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
@@ -274,7 +275,7 @@ export function registerTools(pi: ExtensionAPI) {
       regex: Type.Optional(Type.Boolean({ description: "Treat pattern as a regex (default false)", default: false })),
       settle: Type.Optional(Type.Number({ description: "Seconds of silence that counts as idle (wait_for=idle, default 2)", default: 2 })),
       timeout: Type.Optional(Type.Number({ description: "Max seconds to wait after sending (default 60)", default: 60 })),
-      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
@@ -408,7 +409,7 @@ export function registerTools(pi: ExtensionAPI) {
       pattern: Type.Optional(Type.String({ description: "Text to look for (substring match unless regex=true); required when for=output" })),
       regex: Type.Optional(Type.Boolean({ description: "Treat pattern as a regular expression (default false)", default: false })),
       timeout: Type.Optional(Type.Number({ description: "Max seconds to wait (default 300)", default: 300 })),
-      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
 
     async execute(_toolCallId, params, signal) {
@@ -528,7 +529,7 @@ export function registerTools(pi: ExtensionAPI) {
       pane_id: Type.String({ description: "Pane id (e.g. terminal_3 or 3)" }),
       settle: Type.Optional(Type.Number({ description: "Seconds of silence that counts as idle (default 2)", default: 2 })),
       timeout: Type.Optional(Type.Number({ description: "Max seconds to wait (default 300)", default: 300 })),
-      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
@@ -596,7 +597,7 @@ export function registerTools(pi: ExtensionAPI) {
       resource: Type.Optional(
         Type.String({ description: "What to list: panes (default), tabs, or sessions", enum: ["panes", "tabs", "sessions"], default: "panes" }),
       ),
-      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
@@ -651,7 +652,7 @@ export function registerTools(pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       pane_id: Type.Optional(Type.String({ description: "Pane id (e.g. terminal_3 or 3). Default: the pane this agent runs in." })),
-      session: Type.Optional(Type.String({ description: "Zellij session name (default: current session when running inside zellij, else a session named 'pi', auto-created)" })),
+      session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
     async execute(_toolCallId, params, signal) {
       const sessionArgs = await resolveSession(params.session);
