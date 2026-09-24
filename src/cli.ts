@@ -3,6 +3,8 @@
  * list and query panes.
  */
 import { spawn } from "node:child_process";
+import * as path from "node:path";
+import { findRepo } from "./workspace.ts";
 
 export interface ExecResult {
   stdout: string;
@@ -79,15 +81,10 @@ export async function listSessions(): Promise<string[]> {
  * Resolve which session commands should target:
  * - explicit session: auto-create it headless if it does not exist
  * - inside zellij (ZELLIJ env set): current session, no --session flag
- * - otherwise: a persistent default session named "pi"
+ * - otherwise: a persistent session named after the project (nearest git/jj
+ *   repo root basename, else cwd basename), auto-created headless
  */
-/**
- * Resolve which session commands should target:
- * - explicit session: auto-create it headless if it does not exist
- * - inside zellij (ZELLIJ env set): current session, no --session flag
- * - otherwise: a persistent default session named "pi"
- */
-export async function resolveSession(explicit?: string): Promise<string[]> {
+export async function resolveSession(explicit?: string, cwd = process.cwd()): Promise<string[]> {
   if (explicit) {
     const sessions = await listSessions();
     if (!sessions.includes(explicit)) {
@@ -96,11 +93,14 @@ export async function resolveSession(explicit?: string): Promise<string[]> {
     return ["--session", explicit];
   }
   if (process.env.ZELLIJ) return [];
+  // ponytail: projects sharing a basename share a session; qualify with the parent dir if that ever hurts
+  const repo = await findRepo(cwd);
+  const name = repo ? path.basename(repo.root) : path.basename(cwd);
   const sessions = await listSessions();
-  if (!sessions.includes("pi")) {
-    await runZellij(["attach", "--create-background", "pi"]);
+  if (!sessions.includes(name)) {
+    await runZellij(["attach", "--create-background", name]);
   }
-  return ["--session", "pi"];
+  return ["--session", name];
 }
 
 /** Normalize a pane id like "terminal_3" or "3". */

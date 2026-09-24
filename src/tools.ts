@@ -80,6 +80,9 @@ function watchPaneExit(
   })();
 }
 
+/** Session args for one tool call: the `session` param wins; outside zellij the fallback session is named after Pi's cwd. */
+const toolSessionArgs = (params: { session?: string }, ctx?: { cwd?: string }) => resolveSession(params.session, ctx?.cwd);
+
 export function registerTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "zellij_run",
@@ -131,7 +134,7 @@ export function registerTools(pi: ExtensionAPI) {
       ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const sessionArgs = await resolveSession(params.session);
+      const sessionArgs = await toolSessionArgs(params, ctx);
       const sessionLabel = sessionArgs[1] ?? "current";
       const cwd = params.cwd ?? ctx?.cwd ?? process.cwd();
       const targetTab = params.target === "tab";
@@ -224,8 +227,8 @@ export function registerTools(pi: ExtensionAPI) {
       ),
       session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
-    async execute(_toolCallId, params, signal) {
-      const sessionArgs = await resolveSession(params.session);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const sessionArgs = await toolSessionArgs(params, ctx);
       const paneId = normalizePaneId(params.pane_id);
       const output = await dumpPane(paneId, params.full !== false, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal);
       return {
@@ -277,8 +280,8 @@ export function registerTools(pi: ExtensionAPI) {
       timeout: Type.Optional(Type.Number({ description: "Max seconds to wait after sending (default 60)", default: 60 })),
       session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
-    async execute(_toolCallId, params, signal) {
-      const sessionArgs = await resolveSession(params.session);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const sessionArgs = await toolSessionArgs(params, ctx);
       const paneId = normalizePaneId(params.pane_id);
       // zellij silently ignores paste/send-keys to a nonexistent pane (exit 0) — verify first
       findPane(await listPanes(sessionArgs), paneId);
@@ -412,8 +415,8 @@ export function registerTools(pi: ExtensionAPI) {
       session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
 
-    async execute(_toolCallId, params, signal) {
-      const sessionArgs = await resolveSession(params.session);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const sessionArgs = await toolSessionArgs(params, ctx);
       const timeoutMs = (params.timeout ?? 300) * 1000;
 
       if (params.for === "exit") {
@@ -531,8 +534,8 @@ export function registerTools(pi: ExtensionAPI) {
       timeout: Type.Optional(Type.Number({ description: "Max seconds to wait (default 300)", default: 300 })),
       session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
-    async execute(_toolCallId, params, signal) {
-      const sessionArgs = await resolveSession(params.session);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const sessionArgs = await toolSessionArgs(params, ctx);
       const timeoutMs = (params.timeout ?? 300) * 1000;
       const res = await waitForIdle(params.pane_id, (params.settle ?? 2) * 1000, timeoutMs, sessionArgs, signal);
       const ev = await dumpPane(params.pane_id, true, 100, true, sessionArgs, signal);
@@ -599,8 +602,8 @@ export function registerTools(pi: ExtensionAPI) {
       ),
       session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
-    async execute(_toolCallId, params, signal) {
-      const sessionArgs = await resolveSession(params.session);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const sessionArgs = await toolSessionArgs(params, ctx);
       if (params.resource === "sessions") {
         const sessions = await listSessions();
         return {
@@ -654,8 +657,8 @@ export function registerTools(pi: ExtensionAPI) {
       pane_id: Type.Optional(Type.String({ description: "Pane id (e.g. terminal_3 or 3). Default: the pane this agent runs in." })),
       session: Type.Optional(Type.String({ description: "Zellij session name. Leave unset to target the session you are running in; pass a name only to deliberately target a different session (explicit names are auto-created when absent)." })),
     }),
-    async execute(_toolCallId, params, signal) {
-      const sessionArgs = await resolveSession(params.session);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const sessionArgs = await toolSessionArgs(params, ctx);
       const paneId = normalizePaneId(params.pane_id);
       const { stdout, code } = await runZellij([...sessionArgs, "action", "close-pane", "--pane-id", paneId], { signal });
       if (code !== 0) throw new Error(`close-pane failed: ${stdout}`);

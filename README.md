@@ -98,6 +98,7 @@ The bundled `zellij` skill is the agent's manual: session targeting, the tool-ch
 npm install                                             # once, for a fresh clone
 node --experimental-strip-types test/harness.ts         # tools, live session (fresh per run)
 node --experimental-strip-types test/wait-test.ts       # idle deduplication (no live session needed)
+node --experimental-strip-types test/session-test.ts     # fallback session naming (no live session needed)
 node --experimental-strip-types test/run-test.ts        # streamed run lifecycle + explicit sessions
 node --experimental-strip-types test/notify-test.ts      # background exit signals + suppression
 node --experimental-strip-types test/send-test.ts       # send + wait (pattern/idle/exit) in one call

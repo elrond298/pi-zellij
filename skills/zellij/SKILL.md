@@ -18,7 +18,7 @@ Prefer Pi's `bash` tool for short-lived noninteractive commands. Choose `zellij_
 
 New panes start hidden: they land in the invoking Pi tab's floating layer without changing the human's focus, and a closed floating layer stays closed. The human reveals them with `/zellij-ps`. `target=tab` opens a tab instead.
 
-Pass `session` only to deliberately land work in a DIFFERENT session than the one you run in. Leave it unset otherwise: it targets the session you run in (or an auto-created fallback session when outside Zellij), and results report which session was actually used. Never pass a name just because a tool description mentions one. Parameter defaults live in each tool's own description; this file is about choosing and composing them.
+Pass `session` only to deliberately land work in a DIFFERENT session than the one you run in. Leave it unset otherwise: it targets the session you run in (or, when outside Zellij, an auto-created session named after the project), and results report which session was actually used. Never pass a name just because a tool description mentions one. Parameter defaults live in each tool's own description; this file is about choosing and composing them.
 
 ## Which verb?
 
