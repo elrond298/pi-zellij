@@ -14,7 +14,7 @@ import { dumpPane, capNote, showLine } from "./output.ts";
  * completion signal. A poller watches the pane and, when its process exits,
  * pi.sendMessage(..., {deliverAs: "followUp", triggerTurn: true}) wakes the agent
  * with the exit status and last output. Tools that already report the exit
- * themselves (zellij_wait, zellij_close) mark it known so the agent is never
+ * themselves (including dump/list of exited panes) mark it known so the agent is never
  * told twice about the same pane.
  */
 type ExitWatch = { consumed: boolean };
@@ -22,9 +22,11 @@ const exitWatches = new Map<string, ExitWatch>();
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const watchKey = (sessionArgs: string[], paneId: string) => JSON.stringify([sessionArgs[1] ?? process.env.ZELLIJ_SESSION_NAME ?? "", paneId.replace(/^terminal_/, "")]);
+
 /** The exit was already reported to the agent through a tool result — suppress its notification. */
-function markExitKnown(paneId: string) {
-  const watch = exitWatches.get(paneId.replace(/^terminal_/, ""));
+function markExitKnown(sessionArgs: string[], paneId: string) {
+  const watch = exitWatches.get(watchKey(sessionArgs, paneId));
   if (watch) watch.consumed = true;
 }
 
@@ -33,7 +35,7 @@ function watchPaneExit(
   opts: { sessionArgs: string[]; paneId: string; command: string; name?: string },
 ) {
   const watch: ExitWatch = { consumed: false };
-  const key = opts.paneId.replace(/^terminal_/, "");
+  const key = watchKey(opts.sessionArgs, opts.paneId);
   exitWatches.set(key, watch);
   const started = Date.now();
   void (async () => {
@@ -54,16 +56,16 @@ function watchPaneExit(
         break;
       }
     }
-    exitWatches.delete(key);
-    if (watch.consumed || !state?.exited) return;
     let evidence = "";
-    if (!state.removed) {
+    if (!watch.consumed && state?.exited && !state.removed) {
       try {
         evidence = (await dumpPane(opts.paneId, true, 15, true, opts.sessionArgs)).text;
       } catch {
         // pane vanished between detection and dump — status alone still signals
       }
     }
+    if (exitWatches.get(key) === watch) exitWatches.delete(key);
+    if (watch.consumed || !state?.exited) return;
     const label = opts.name ? `${opts.paneId} (${opts.name})` : opts.paneId;
     const status = state.exit_status !== null ? `with status ${state.exit_status}` : "(pane removed from layout; no exit status or output)";
     pi.sendMessage(
@@ -230,7 +232,9 @@ export function registerTools(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const sessionArgs = await toolSessionArgs(params, ctx);
       const paneId = normalizePaneId(params.pane_id);
+      const state = exitWatches.has(watchKey(sessionArgs, paneId)) ? await paneExitState(sessionArgs, paneId) : null;
       const output = await dumpPane(paneId, params.full !== false, params.max_lines ?? 500, params.tail !== false, sessionArgs, signal);
+      if (state?.exited) markExitKnown(sessionArgs, paneId);
       return {
         content: [{ type: "text", text: output.text + capNote(output) }],
         details: { pane_id: paneId, truncated: output.truncated, compressed_lines: output.compressed, lines: output.text.split("\n").length },
@@ -335,7 +339,7 @@ export function registerTools(pi: ExtensionAPI) {
             };
           }
           if (res.status === "exited") {
-            markExitKnown(paneId);
+            markExitKnown(sessionArgs, paneId);
             const ev = res.removed ? null : await evidence(30);
             return {
               content: [{ type: "text", text: `${sentText} Pattern not in new output — pane exited` + (res.exit_status !== null ? ` with status ${res.exit_status}` : " (removed from layout)") + ` after ${(res.elapsedMs / 1000).toFixed(1)}s.` + (ev ? `\n\nLast output:\n${ev}` : "") }],
@@ -350,7 +354,7 @@ export function registerTools(pi: ExtensionAPI) {
         }
         if (params.wait_for === "idle") {
           const res = await waitForIdle(paneId, (params.settle ?? 2) * 1000, timeoutMs, sessionArgs, signal);
-          if (res.status === "exited") markExitKnown(paneId);
+          if (res.status === "exited") markExitKnown(sessionArgs, paneId);
           if (res.status === "idle") {
             const ev = await evidence(100);
             return {
@@ -372,7 +376,7 @@ export function registerTools(pi: ExtensionAPI) {
           };
         }
         const res = await waitForPaneExit(paneId, timeoutMs, sessionArgs, signal);
-        if (res.exited) markExitKnown(paneId);
+        if (res.exited) markExitKnown(sessionArgs, paneId);
         const outcome = res.exited
           ? `Pane ${paneId} exited` + (res.exit_status !== null ? ` with status ${res.exit_status}` : " (removed from layout)") + ` after ${(res.elapsed_ms / 1000).toFixed(1)}s.`
           : `Pane ${paneId} still running after ${params.timeout ?? 60}s (timeout).`;
@@ -424,7 +428,7 @@ export function registerTools(pi: ExtensionAPI) {
         // shells are removed from the layout when they exit, which is itself the signal).
         const res = await waitForPaneExit(params.pane_id, timeoutMs, sessionArgs, signal);
         const exited = res.exited;
-        if (exited) markExitKnown(params.pane_id);
+        if (exited) markExitKnown(sessionArgs, params.pane_id);
         // Evidence on failure: a timed-out exit-wait carries the pane's last output.
         let evidence: string | null = null;
         if (!exited) {
@@ -472,7 +476,7 @@ export function registerTools(pi: ExtensionAPI) {
         signal,
       );
       if (res.status === "exited") {
-        markExitKnown(params.pane_id);
+        markExitKnown(sessionArgs, params.pane_id);
         // Terminal state reached before the pattern: return it, not a timeout.
         return {
           content: [
@@ -553,7 +557,7 @@ export function registerTools(pi: ExtensionAPI) {
         };
       }
       if (res.status === "exited") {
-        markExitKnown(params.pane_id);
+        markExitKnown(sessionArgs, params.pane_id);
         return {
           content: [
             {
@@ -636,6 +640,9 @@ export function registerTools(pi: ExtensionAPI) {
         })
         .join("\n");
 
+      for (const pane of panes) {
+        if (pane.exited) markExitKnown(sessionArgs, String(pane.id));
+      }
       return {
         content: [{ type: "text", text: text || "(no panes)" }],
         details: { panes: panes.map((p) => ({ ...p, id: `terminal_${p.id}` })) },
@@ -662,7 +669,7 @@ export function registerTools(pi: ExtensionAPI) {
       const paneId = normalizePaneId(params.pane_id);
       const { stdout, code } = await runZellij([...sessionArgs, "action", "close-pane", "--pane-id", paneId], { signal });
       if (code !== 0) throw new Error(`close-pane failed: ${stdout}`);
-      markExitKnown(paneId);
+      markExitKnown(sessionArgs, paneId);
       return { content: [{ type: "text", text: `Closed pane ${paneId}.` }], details: { pane_id: paneId } };
     },
   });
